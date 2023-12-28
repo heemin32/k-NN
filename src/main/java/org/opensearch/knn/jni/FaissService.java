@@ -81,9 +81,15 @@ class FaissService {
      * @param k neighbors to be returned
      * @return KNNQueryResult array of k neighbors
      */
-    public static native KNNQueryResult[] queryIndex(long indexPointer, float[] queryVector, int k);
+    public static native KNNQueryResult[] queryIndex(long indexPointer, float[] queryVector, int k, int[] parentIds);
 
-    public static native KNNQueryResult[] queryIndexWithFilter(long indexPointer, float[] queryVector, int k, int[] filterIds);
+    public static native KNNQueryResult[] queryIndexWithFilter(
+        long indexPointer,
+        float[] queryVector,
+        int k,
+        int[] filterIds,
+        int[] parentIds
+    );
 
     /**
      * Free native memory pointer
