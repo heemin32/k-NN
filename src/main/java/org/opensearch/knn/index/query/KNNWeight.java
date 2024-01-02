@@ -12,6 +12,7 @@ import org.apache.lucene.index.DocValues;
 import org.apache.lucene.search.FilteredDocIdSetIterator;
 import org.apache.lucene.search.HitQueue;
 import org.apache.lucene.search.ScoreDoc;
+import org.apache.lucene.search.join.BitSetProducer;
 import org.apache.lucene.util.BitSet;
 import org.apache.lucene.util.BitSetIterator;
 import org.apache.lucene.util.Bits;
@@ -119,7 +120,7 @@ public class KNNWeight extends Weight {
         if (filterWeight != null && canDoExactSearch(filterIdsArray.length)) {
             docIdsToScoreMap.putAll(doExactSearch(context, filterIdsArray));
         } else {
-            Map<Integer, Float> annResults = doANNSearch(context, filterIdsArray);
+            Map<Integer, Float> annResults = doANNSearch(context, filterIdsArray, knnQuery.getBitSetProducer());
             if (annResults == null) {
                 return null;
             }
@@ -172,23 +173,33 @@ public class KNNWeight extends Weight {
         if (filterWeight == null) {
             return new int[0];
         }
-        final BitSet filteredDocsBitSet = getFilteredDocsBitSet(context, this.filterWeight);
-        final int[] filteredIds = new int[filteredDocsBitSet.cardinality()];
-        int filteredIdsIndex = 0;
+        return bitSetToIntArray(getFilteredDocsBitSet(context, this.filterWeight));
+    }
+
+    private int[] getParentIdsArray(final LeafReaderContext context, final BitSetProducer parentFilter) throws IOException {
+        if (parentFilter == null) {
+            return null;
+        }
+        return bitSetToIntArray(parentFilter.getBitSet(context));
+    }
+
+    private int[] bitSetToIntArray(final BitSet bitSet) {
+        final int[] intArray = new int[bitSet.cardinality()];
+        int index = 0;
         int docId = 0;
-        while (docId < filteredDocsBitSet.length()) {
-            docId = filteredDocsBitSet.nextSetBit(docId);
+        while (docId < bitSet.length()) {
+            docId = bitSet.nextSetBit(docId);
             if (docId == DocIdSetIterator.NO_MORE_DOCS || docId + 1 == DocIdSetIterator.NO_MORE_DOCS) {
                 break;
             }
-            filteredIds[filteredIdsIndex] = docId;
-            filteredIdsIndex++;
+            intArray[index] = docId;
+            index++;
             docId++;
         }
-        return filteredIds;
+        return intArray;
     }
 
-    private Map<Integer, Float> doANNSearch(final LeafReaderContext context, final int[] filterIdsArray) throws IOException {
+    private Map<Integer, Float> doANNSearch(final LeafReaderContext context, final int[] filterIdsArray, final BitSetProducer parentFilter) throws IOException {
         SegmentReader reader = (SegmentReader) FilterLeafReader.unwrap(context.reader());
         String directory = ((FSDirectory) FilterDirectory.unwrap(reader.directory())).getDirectory().toString();
 
@@ -265,13 +276,14 @@ public class KNNWeight extends Weight {
             if (indexAllocation.isClosed()) {
                 throw new RuntimeException("Index has already been closed");
             }
-
+            int[] parentIds = getParentIdsArray(context, parentFilter);
             results = JNIService.queryIndex(
                 indexAllocation.getMemoryAddress(),
                 knnQuery.getQueryVector(),
                 knnQuery.getK(),
                 knnEngine.getName(),
-                filterIdsArray
+                filterIdsArray,
+                parentIds
             );
 
         } catch (Exception e) {

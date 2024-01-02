@@ -12,6 +12,7 @@
 package org.opensearch.knn.jni;
 
 import org.apache.commons.lang.ArrayUtils;
+import org.apache.lucene.util.BitSet;
 import org.opensearch.knn.index.query.KNNQueryResult;
 import org.opensearch.knn.index.util.KNNEngine;
 
@@ -101,7 +102,7 @@ public class JNIService {
      * @param filteredIds  array of ints on which should be used for search.
      * @return KNNQueryResult array of k neighbors
      */
-    public static KNNQueryResult[] queryIndex(long indexPointer, float[] queryVector, int k, String engineName, int[] filteredIds) {
+    public static KNNQueryResult[] queryIndex(long indexPointer, float[] queryVector, int k, String engineName, int[] filteredIds, int[] parentIds) {
         if (KNNEngine.NMSLIB.getName().equals(engineName)) {
             return NmslibService.queryIndex(indexPointer, queryVector, k);
         }
@@ -112,9 +113,9 @@ public class JNIService {
             // filterIds. FilterIds is coming as empty then its the case where we need to do search with Faiss engine
             // normally.
             if (ArrayUtils.isNotEmpty(filteredIds)) {
-                return FaissService.queryIndexWithFilter(indexPointer, queryVector, k, filteredIds, null);
+                return FaissService.queryIndexWithFilter(indexPointer, queryVector, k, filteredIds, parentIds);
             }
-            return FaissService.queryIndex(indexPointer, queryVector, k, null);
+            return FaissService.queryIndex(indexPointer, queryVector, k, parentIds);
         }
         throw new IllegalArgumentException("QueryIndex not supported for provided engine");
     }

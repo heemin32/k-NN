@@ -15,6 +15,7 @@ import org.apache.lucene.search.Query;
 import org.apache.lucene.search.QueryVisitor;
 import org.apache.lucene.search.ScoreMode;
 import org.apache.lucene.search.Weight;
+import org.apache.lucene.search.join.BitSetProducer;
 import org.opensearch.knn.index.KNNSettings;
 
 import java.io.IOException;
@@ -33,20 +34,24 @@ public class KNNQuery extends Query {
     @Getter
     @Setter
     private Query filterQuery;
+    @Getter
+    private BitSetProducer bitSetProducer;
 
-    public KNNQuery(String field, float[] queryVector, int k, String indexName) {
+    public KNNQuery(String field, float[] queryVector, int k, String indexName, final BitSetProducer bitSetProducer) {
         this.field = field;
         this.queryVector = queryVector;
         this.k = k;
         this.indexName = indexName;
+        this.bitSetProducer = bitSetProducer;
     }
 
-    public KNNQuery(String field, float[] queryVector, int k, String indexName, Query filterQuery) {
+    public KNNQuery(String field, float[] queryVector, int k, String indexName, Query filterQuery, BitSetProducer bitSetProducer) {
         this.field = field;
         this.queryVector = queryVector;
         this.k = k;
         this.indexName = indexName;
         this.filterQuery = filterQuery;
+        this.bitSetProducer = bitSetProducer;
     }
 
     public String getField() {
