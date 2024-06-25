@@ -167,11 +167,15 @@ public interface NativeMemoryLoadStrategy<T extends NativeMemoryAllocation, U ex
             NativeMemoryAllocation.TrainingDataAllocation trainingDataAllocation = new NativeMemoryAllocation.TrainingDataAllocation(
                 executor,
                 0,
-                nativeMemoryEntryContext.calculateSizeInKB()
+                nativeMemoryEntryContext.calculateSizeInKB(),
+                nativeMemoryEntryContext.getVectorDataType()
             );
 
             // Start loading all training data. Once the data has been loaded, release the lock
-            TrainingDataConsumer trainingDataConsumer = new TrainingDataConsumer(trainingDataAllocation);
+            TrainingDataConsumer trainingDataConsumer = new TrainingDataConsumer(
+                trainingDataAllocation,
+                nativeMemoryEntryContext.getVectorDataType()
+            );
 
             trainingDataAllocation.writeLock();
 

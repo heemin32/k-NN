@@ -117,7 +117,7 @@ public class IndexUtilTests extends KNNTestCase {
         when(trainingFieldModelMetadata.getDimension()).thenReturn(dimension);
         when(modelDao.getMetadata(anyString())).thenReturn(trainingFieldModelMetadata);
 
-        ValidationException e = IndexUtil.validateKnnField(indexMetadata, field, dimension, modelDao);
+        ValidationException e = IndexUtil.validateKnnField(indexMetadata, field, dimension, modelDao, null);
 
         assertNull(e);
     }
@@ -138,7 +138,7 @@ public class IndexUtilTests extends KNNTestCase {
         when(trainingFieldModelMetadata.getDimension()).thenReturn(dimension);
         when(modelDao.getMetadata(anyString())).thenReturn(trainingFieldModelMetadata);
 
-        ValidationException e = IndexUtil.validateKnnField(indexMetadata, field, dimension, modelDao);
+        ValidationException e = IndexUtil.validateKnnField(indexMetadata, field, dimension, modelDao, null);
 
         assertNull(e);
     }
@@ -158,7 +158,7 @@ public class IndexUtilTests extends KNNTestCase {
         when(trainingFieldModelMetadata.getDimension()).thenReturn(dimension);
         when(modelDao.getMetadata(anyString())).thenReturn(trainingFieldModelMetadata);
 
-        ValidationException e = IndexUtil.validateKnnField(indexMetadata, field, dimension, modelDao);
+        ValidationException e = IndexUtil.validateKnnField(indexMetadata, field, dimension, modelDao, null);
 
         assert Objects.requireNonNull(e).getMessage().matches("Validation Failed: 1: Field \"" + field + "\" is not of type knn_vector.;");
     }
@@ -182,7 +182,7 @@ public class IndexUtilTests extends KNNTestCase {
         when(trainingFieldModelMetadata.getDimension()).thenReturn(dimension);
         when(modelDao.getMetadata(anyString())).thenReturn(trainingFieldModelMetadata);
 
-        ValidationException e = IndexUtil.validateKnnField(indexMetadata, field, dimension, modelDao);
+        ValidationException e = IndexUtil.validateKnnField(indexMetadata, field, dimension, modelDao, null);
 
         assert (Objects.requireNonNull(e).getMessage().matches("Validation Failed: 1: Field \"" + field + "\" does not exist.;"));
     }
@@ -206,7 +206,7 @@ public class IndexUtilTests extends KNNTestCase {
         when(trainingFieldModelMetadata.getDimension()).thenReturn(dimension);
         when(modelDao.getMetadata(anyString())).thenReturn(trainingFieldModelMetadata);
 
-        ValidationException e = IndexUtil.validateKnnField(indexMetadata, field, dimension, modelDao);
+        ValidationException e = IndexUtil.validateKnnField(indexMetadata, field, dimension, modelDao, null);
 
         System.out.println(Objects.requireNonNull(e).getMessage());
 
@@ -223,7 +223,7 @@ public class IndexUtilTests extends KNNTestCase {
         when(trainingFieldModelMetadata.getDimension()).thenReturn(dimension);
         when(modelDao.getMetadata(anyString())).thenReturn(trainingFieldModelMetadata);
 
-        ValidationException e = IndexUtil.validateKnnField(indexMetadata, field, dimension, modelDao);
+        ValidationException e = IndexUtil.validateKnnField(indexMetadata, field, dimension, modelDao, null);
 
         assert (Objects.requireNonNull(e).getMessage().matches("Validation Failed: 1: Invalid index. Index does not contain a mapping;"));
     }

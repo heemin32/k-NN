@@ -26,6 +26,7 @@ import org.opensearch.knn.common.KNNConstants;
 import org.opensearch.knn.index.IndexUtil;
 import org.opensearch.knn.index.MethodComponentContext;
 import org.opensearch.knn.index.SpaceType;
+import org.opensearch.knn.index.VectorDataType;
 import org.opensearch.knn.index.util.KNNEngine;
 
 import java.io.IOException;
@@ -48,6 +49,7 @@ public class ModelMetadata implements Writeable, ToXContentObject {
     final private String timestamp;
     final private String description;
     final private String trainingNodeAssignment;
+    final private VectorDataType vectorDataType;
     private MethodComponentContext methodComponentContext;
     private String error;
 
@@ -81,6 +83,12 @@ public class ModelMetadata implements Writeable, ToXContentObject {
         } else {
             this.methodComponentContext = MethodComponentContext.EMPTY;
         }
+
+        if (IndexUtil.isVersionOnOrAfterMinRequiredVersion(in.getVersion(), KNNConstants.MODEL_VECTOR_DATA_TYPE_KEY)) {
+            this.vectorDataType = VectorDataType.get(in.readString());
+        } else {
+            this.vectorDataType = VectorDataType.FLOAT;
+        }
     }
 
     /**
@@ -95,6 +103,7 @@ public class ModelMetadata implements Writeable, ToXContentObject {
      * @param error error message associated with model
      * @param trainingNodeAssignment node assignment for the model
      * @param methodComponentContext method component context associated with model
+     * @param vectorDataType vector data type of the model
      */
     public ModelMetadata(
         KNNEngine knnEngine,
@@ -105,7 +114,8 @@ public class ModelMetadata implements Writeable, ToXContentObject {
         String description,
         String error,
         String trainingNodeAssignment,
-        MethodComponentContext methodComponentContext
+        MethodComponentContext methodComponentContext,
+        VectorDataType vectorDataType
     ) {
         this.knnEngine = Objects.requireNonNull(knnEngine, "knnEngine must not be null");
         this.spaceType = Objects.requireNonNull(spaceType, "spaceType must not be null");
@@ -128,6 +138,7 @@ public class ModelMetadata implements Writeable, ToXContentObject {
         this.error = Objects.requireNonNull(error, "error must not be null");
         this.trainingNodeAssignment = Objects.requireNonNull(trainingNodeAssignment, "node assignment must not be null");
         this.methodComponentContext = Objects.requireNonNull(methodComponentContext, "method context must not be null");
+        this.vectorDataType = Objects.requireNonNull(vectorDataType, "vector data type must not be null");
     }
 
     /**
@@ -211,6 +222,10 @@ public class ModelMetadata implements Writeable, ToXContentObject {
         return methodComponentContext;
     }
 
+    public VectorDataType getVectorDataType() {
+        return vectorDataType;
+    }
+
     /**
      * setter for model's state
      *
@@ -241,7 +256,8 @@ public class ModelMetadata implements Writeable, ToXContentObject {
             description,
             error,
             trainingNodeAssignment,
-            methodComponentContext.toClusterStateString()
+            methodComponentContext.toClusterStateString(),
+            vectorDataType.getValue()
         );
     }
 
@@ -259,6 +275,7 @@ public class ModelMetadata implements Writeable, ToXContentObject {
         equalsBuilder.append(getTimestamp(), other.getTimestamp());
         equalsBuilder.append(getDescription(), other.getDescription());
         equalsBuilder.append(getError(), other.getError());
+        equalsBuilder.append(getVectorDataType(), other.getVectorDataType());
 
         return equalsBuilder.isEquals();
     }
@@ -273,6 +290,7 @@ public class ModelMetadata implements Writeable, ToXContentObject {
             .append(getDescription())
             .append(getError())
             .append(getMethodComponentContext())
+            .append(getVectorDataType())
             .toHashCode();
     }
 
@@ -308,7 +326,8 @@ public class ModelMetadata implements Writeable, ToXContentObject {
                 description,
                 error,
                 "",
-                MethodComponentContext.EMPTY
+                MethodComponentContext.EMPTY,
+                VectorDataType.FLOAT
             );
         } else if (modelMetadataArray.length == 8) {
             log.debug("Model metadata contains training node assignment.  Assuming empty method component context.");
@@ -329,7 +348,8 @@ public class ModelMetadata implements Writeable, ToXContentObject {
                 description,
                 error,
                 trainingNodeAssignment,
-                MethodComponentContext.EMPTY
+                MethodComponentContext.EMPTY,
+                VectorDataType.FLOAT
             );
         } else if (modelMetadataArray.length == 9) {
             log.debug("Model metadata contains training node assignment and method context");
@@ -351,12 +371,37 @@ public class ModelMetadata implements Writeable, ToXContentObject {
                 description,
                 error,
                 trainingNodeAssignment,
-                methodComponentContext
+                methodComponentContext,
+                VectorDataType.FLOAT
+            );
+        } else if (modelMetadataArray.length == 10) {
+            log.debug("Model metadata contains training node assignment and method context and vector data type");
+            KNNEngine knnEngine = KNNEngine.getEngine(modelMetadataArray[0]);
+            SpaceType spaceType = SpaceType.getSpace(modelMetadataArray[1]);
+            int dimension = Integer.parseInt(modelMetadataArray[2]);
+            ModelState modelState = ModelState.getModelState(modelMetadataArray[3]);
+            String timestamp = modelMetadataArray[4];
+            String description = modelMetadataArray[5];
+            String error = modelMetadataArray[6];
+            String trainingNodeAssignment = modelMetadataArray[7];
+            MethodComponentContext methodComponentContext = MethodComponentContext.fromClusterStateString(modelMetadataArray[8]);
+            VectorDataType vectorDataType = VectorDataType.get(modelMetadataArray[9]);
+            return new ModelMetadata(
+                knnEngine,
+                spaceType,
+                dimension,
+                modelState,
+                timestamp,
+                description,
+                error,
+                trainingNodeAssignment,
+                methodComponentContext,
+                vectorDataType
             );
         } else {
             throw new IllegalArgumentException(
                 "Illegal format for model metadata. Must be of the form "
-                    + "\"<KNNEngine>,<SpaceType>,<Dimension>,<ModelState>,<Timestamp>,<Description>,<Error>\" or \"<KNNEngine>,<SpaceType>,<Dimension>,<ModelState>,<Timestamp>,<Description>,<Error>,<NodeAssignment>\" or \"<KNNEngine>,<SpaceType>,<Dimension>,<ModelState>,<Timestamp>,<Description>,<Error>,<NodeAssignment>,<MethodContext>\"."
+                    + "\"<KNNEngine>,<SpaceType>,<Dimension>,<ModelState>,<Timestamp>,<Description>,<Error>\" or \"<KNNEngine>,<SpaceType>,<Dimension>,<ModelState>,<Timestamp>,<Description>,<Error>,<NodeAssignment>\" or \"<KNNEngine>,<SpaceType>,<Dimension>,<ModelState>,<Timestamp>,<Description>,<Error>,<NodeAssignment>,<MethodContext>\" or \"<KNNEngine>,<SpaceType>,<Dimension>,<ModelState>,<Timestamp>,<Description>,<Error>,<NodeAssignment>,<MethodContext>,<VectorDataType>\"."
             );
         }
     }
@@ -387,6 +432,7 @@ public class ModelMetadata implements Writeable, ToXContentObject {
         Object error = modelSourceMap.get(KNNConstants.MODEL_ERROR);
         Object trainingNodeAssignment = modelSourceMap.get(KNNConstants.MODEL_NODE_ASSIGNMENT);
         Object methodComponentContext = modelSourceMap.get(KNNConstants.MODEL_METHOD_COMPONENT_CONTEXT);
+        Object vectorDataType = modelSourceMap.get(KNNConstants.VECTOR_DATA_TYPE_FIELD);
 
         if (trainingNodeAssignment == null) {
             trainingNodeAssignment = "";
@@ -407,6 +453,10 @@ public class ModelMetadata implements Writeable, ToXContentObject {
             methodComponentContext = MethodComponentContext.EMPTY;
         }
 
+        if (vectorDataType == null) {
+            vectorDataType = VectorDataType.FLOAT.getValue();
+        }
+
         ModelMetadata modelMetadata = new ModelMetadata(
             KNNEngine.getEngine(objectToString(engine)),
             SpaceType.getSpace(objectToString(space)),
@@ -416,7 +466,8 @@ public class ModelMetadata implements Writeable, ToXContentObject {
             objectToString(description),
             objectToString(error),
             objectToString(trainingNodeAssignment),
-            (MethodComponentContext) methodComponentContext
+            (MethodComponentContext) methodComponentContext,
+            VectorDataType.get(objectToString(vectorDataType))
         );
         return modelMetadata;
     }
@@ -435,6 +486,9 @@ public class ModelMetadata implements Writeable, ToXContentObject {
         }
         if (IndexUtil.isVersionOnOrAfterMinRequiredVersion(out.getVersion(), IndexUtil.MODEL_METHOD_COMPONENT_CONTEXT_KEY)) {
             getMethodComponentContext().writeTo(out);
+        }
+        if (IndexUtil.isVersionOnOrAfterMinRequiredVersion(out.getVersion(), KNNConstants.MODEL_VECTOR_DATA_TYPE_KEY)) {
+            out.writeString(vectorDataType.getValue());
         }
     }
 
@@ -455,6 +509,9 @@ public class ModelMetadata implements Writeable, ToXContentObject {
             builder.field(KNNConstants.MODEL_METHOD_COMPONENT_CONTEXT).startObject();
             getMethodComponentContext().toXContent(builder, params);
             builder.endObject();
+        }
+        if (IndexUtil.isClusterOnOrAfterMinRequiredVersion(KNNConstants.MODEL_VECTOR_DATA_TYPE_KEY)) {
+            builder.field(KNNConstants.VECTOR_DATA_TYPE_FIELD, vectorDataType.getValue());
         }
         return builder;
     }

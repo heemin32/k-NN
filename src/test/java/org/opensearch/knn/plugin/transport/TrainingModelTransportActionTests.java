@@ -17,6 +17,7 @@ import org.opensearch.common.xcontent.XContentFactory;
 import org.opensearch.knn.KNNSingleNodeTestCase;
 import org.opensearch.knn.index.KNNMethodContext;
 import org.opensearch.knn.index.SpaceType;
+import org.opensearch.knn.index.VectorDataType;
 import org.opensearch.knn.index.util.KNNEngine;
 import org.opensearch.knn.indices.ModelDao;
 
@@ -72,7 +73,8 @@ public class TrainingModelTransportActionTests extends KNNSingleNodeTestCase {
             trainingIndexName,
             trainingFieldName,
             null,
-            "test-detector"
+            "test-detector",
+            VectorDataType.FLOAT
         );
         trainingModelRequest.setTrainingDataSizeInKB(estimateVectorSetSizeInKB(trainingDataCount, dimension));
 

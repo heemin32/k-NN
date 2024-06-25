@@ -176,7 +176,8 @@ public class NativeMemoryLoadStrategyTests extends KNNTestCase {
             NativeMemoryLoadStrategy.TrainingLoadStrategy.getInstance(),
             null,
             0,
-            0
+            0,
+            VectorDataType.FLOAT
         );
 
         // Load the allocation. Initially, the memory address should be 0. However, after the readlock is obtained,

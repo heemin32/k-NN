@@ -5,7 +5,6 @@
 
 package org.opensearch.knn.index.codec.KNN80Codec;
 
-import com.google.common.collect.ImmutableMap;
 import lombok.NonNull;
 import lombok.extern.log4j.Log4j2;
 import org.apache.lucene.store.ChecksumIndexInput;
@@ -15,6 +14,7 @@ import org.opensearch.core.common.bytes.BytesArray;
 import org.opensearch.core.xcontent.MediaTypeRegistry;
 import org.opensearch.core.xcontent.DeprecationHandler;
 import org.opensearch.core.xcontent.NamedXContentRegistry;
+import org.opensearch.knn.index.IndexUtil;
 import org.opensearch.knn.index.KNNSettings;
 import org.opensearch.knn.index.VectorDataType;
 import org.opensearch.knn.index.codec.transfer.VectorTransfer;
@@ -112,7 +112,18 @@ class KNN80DocValuesConsumer extends DocValuesConsumer implements Closeable {
     }
 
     private VectorTransfer getVectorTransfer(FieldInfo field) {
-        if (VectorDataType.BINARY.getValue().equalsIgnoreCase(field.attributes().get(KNNConstants.VECTOR_DATA_TYPE_FIELD))) {
+        boolean isBinary = false;
+
+        // Check if the field has a model ID and retrieve the model's vector data type
+        if (field.attributes().containsKey(MODEL_ID)) {
+            Model model = ModelCache.getInstance().get(field.attributes().get(MODEL_ID));
+            isBinary = model.getModelMetadata().getVectorDataType() == VectorDataType.BINARY;
+        } else if (VectorDataType.BINARY.getValue().equalsIgnoreCase(field.attributes().get(KNNConstants.VECTOR_DATA_TYPE_FIELD))) {
+            isBinary = true;
+        }
+
+        // Return the appropriate VectorTransfer instance based on the vector data type
+        if (isBinary) {
             return new VectorTransferByte(KNNSettings.getVectorStreamingMemoryLimit().getBytes());
         }
         return new VectorTransferFloat(KNNSettings.getVectorStreamingMemoryLimit().getBytes());
@@ -154,7 +165,7 @@ class KNN80DocValuesConsumer extends DocValuesConsumer implements Closeable {
             if (model.getModelBlob() == null) {
                 throw new RuntimeException(String.format("There is no trained model with id \"%s\"", modelId));
             }
-            indexCreator = () -> createKNNIndexFromTemplate(model.getModelBlob(), pair, knnEngine, indexPath);
+            indexCreator = () -> createKNNIndexFromTemplate(model, pair, knnEngine, indexPath);
         } else {
             indexCreator = () -> createKNNIndexFromScratch(field, pair, knnEngine, indexPath);
         }
@@ -188,18 +199,19 @@ class KNN80DocValuesConsumer extends DocValuesConsumer implements Closeable {
         KNNGraphValue.REFRESH_TOTAL_OPERATIONS.increment();
     }
 
-    private void createKNNIndexFromTemplate(byte[] model, KNNCodecUtil.Pair pair, KNNEngine knnEngine, String indexPath) {
-        Map<String, Object> parameters = ImmutableMap.of(
-            KNNConstants.INDEX_THREAD_QTY,
-            KNNSettings.state().getSettingValue(KNNSettings.KNN_ALGO_PARAM_INDEX_THREAD_QTY)
-        );
+    private void createKNNIndexFromTemplate(Model model, KNNCodecUtil.Pair pair, KNNEngine knnEngine, String indexPath) {
+        Map<String, Object> parameters = new HashMap<>();
+        parameters.put(KNNConstants.INDEX_THREAD_QTY, KNNSettings.state().getSettingValue(KNNSettings.KNN_ALGO_PARAM_INDEX_THREAD_QTY));
+
+        IndexUtil.updateVectorDataTypeToParameters(parameters, model.getModelMetadata().getVectorDataType());
+
         AccessController.doPrivileged((PrivilegedAction<Void>) () -> {
             JNIService.createIndexFromTemplate(
                 pair.docs,
                 pair.getVectorAddress(),
                 pair.getDimension(),
                 indexPath,
-                model,
+                model.getModelBlob(),
                 parameters,
                 knnEngine
             );
@@ -248,7 +260,7 @@ class KNN80DocValuesConsumer extends DocValuesConsumer implements Closeable {
                 KNNConstants.INDEX_DESCRIPTION_PARAMETER,
                 FAISS_BINARY_INDEX_DESCRIPTION_PREFIX + parameters.get(KNNConstants.INDEX_DESCRIPTION_PARAMETER).toString()
             );
-            parameters.put(KNNConstants.VECTOR_DATA_TYPE_FIELD, VectorDataType.BINARY.getValue());
+            IndexUtil.updateVectorDataTypeToParameters(parameters, VectorDataType.BINARY);
         }
 
         // Used to determine how many threads to use when indexing

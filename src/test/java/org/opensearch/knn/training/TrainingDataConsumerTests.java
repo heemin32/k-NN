@@ -13,6 +13,7 @@ package org.opensearch.knn.training;
 
 import org.mockito.ArgumentCaptor;
 import org.opensearch.knn.KNNTestCase;
+import org.opensearch.knn.index.VectorDataType;
 import org.opensearch.knn.index.memory.NativeMemoryAllocation;
 
 import java.util.ArrayList;
@@ -38,7 +39,7 @@ public class TrainingDataConsumerTests extends KNNTestCase {
         // Capture argument passed to set pointer
         ArgumentCaptor<Long> valueCapture = ArgumentCaptor.forClass(Long.class);
 
-        TrainingDataConsumer trainingDataConsumer = new TrainingDataConsumer(trainingDataAllocation);
+        TrainingDataConsumer trainingDataConsumer = new TrainingDataConsumer(trainingDataAllocation, VectorDataType.FLOAT);
 
         List<Float[]> vectorSet1 = new ArrayList<>(3);
         for (int i = 0; i < 3; i++) {
