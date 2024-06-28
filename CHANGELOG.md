@@ -14,6 +14,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## [Unreleased 2.x](https://github.com/opensearch-project/k-NN/compare/2.15...2.x)
 ### Features
+* Added the support for Binary Index in kNNEngine [#1778](https://github.com/opensearch-project/k-NN/pull/1778)
 ### Enhancements
 ### Bug Fixes
 ### Infrastructure
