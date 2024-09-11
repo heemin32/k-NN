@@ -1,0 +1,60 @@
+import json
+import numpy as np
+import faiss
+
+# Function to read vectors and IDs from JSON file
+def read_vectors_and_ids_from_json(file_path):
+    vectors = []
+    ids = []
+    with open(file_path, 'r') as file:
+        for line in file:
+            data = json.loads(line)
+            ids.append(data['id'])
+            vectors.append(data['vector'])
+    return np.array(ids, dtype=np.int64), np.array(vectors, dtype=np.uint8)
+
+def calculate_recall(ground_truth, query_result):
+    ground_truth_set = set(ground_truth)
+    query_result_set = set(query_result)
+    
+    relevant_retrieved = ground_truth_set.intersection(query_result_set)
+    recall = len(relevant_retrieved) / len(ground_truth_set)
+    
+    return recall
+
+# Path to the JSON file
+json_file_path = 'vectors.json'
+
+# Read vectors and ids
+ids, vectors = read_vectors_and_ids_from_json(json_file_path)
+
+# Create a FAISS binary index
+d = vectors.shape[1] * 8  # Each uint8 becomes 8 bits
+index = faiss.index_binary_factory(d, "BHNSW16,Flat")
+index.hnsw.efConstruction = 100
+index.hnsw.efSearch = 100
+index_f = faiss.IndexBinaryFlat(d)
+
+# Create an IDMap to maintain the document IDs
+id_map = faiss.IndexBinaryIDMap(index)
+id_map_f = faiss.IndexBinaryIDMap(index_f)
+
+# Add vectors and their corresponding IDs to the index
+id_map.add_with_ids(vectors, ids)
+id_map_f.add_with_ids(vectors, ids)
+
+# Example search
+search_vector = np.array([-53, 97, 109, 87, 117, -42, 116, -90, -17, -5, 62, -66, 2, 109, -78, -52], dtype=np.int8)
+search_vector = search_vector.astype(np.uint8)
+
+# Reshape the search vector to match the expected input shape (1, d)
+search_vector = search_vector.reshape(1, -1)
+
+k = 100  # number of nearest neighbors
+D, I = id_map.search(search_vector, k)
+D_f, I_f = id_map_f.search(search_vector, k)
+
+print("Result hnsw:\n", I)
+print("Result flat:\n", I_f)
+recall = calculate_recall(I[0], I_f[0])
+print(f'Recall: {recall}')
