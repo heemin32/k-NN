@@ -10,6 +10,7 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.log4j.Log4j2;
 import org.apache.lucene.index.IndexReader;
 import org.apache.lucene.index.LeafReaderContext;
+import org.apache.lucene.search.DocIdSetIterator;
 import org.apache.lucene.search.IndexSearcher;
 import org.apache.lucene.search.MatchNoDocsQuery;
 import org.apache.lucene.search.Query;
@@ -19,6 +20,7 @@ import org.apache.lucene.search.TopDocs;
 import org.apache.lucene.search.Weight;
 import org.apache.lucene.util.BitSet;
 import org.apache.lucene.util.Bits;
+import org.apache.lucene.util.DocIdSetBuilder;
 import org.opensearch.common.StopWatch;
 import org.opensearch.knn.index.KNNSettings;
 import org.opensearch.knn.index.query.ExactSearcher;
@@ -30,6 +32,7 @@ import org.opensearch.knn.index.query.rescore.RescoreContext;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
@@ -75,16 +78,74 @@ public class NativeEngineKnnVectorQuery extends Query {
             log.debug("Rescoring results took {} ms. oversampled k:{}, segments:{}", rescoreTime, firstPassK, leafReaderContexts.size());
         }
         ResultUtil.reduceToTopK(perLeafResults, finalK);
+        if (knnQuery.getParentsFilter() != null) {
+            perLeafResults = retrieveAll(indexSearcher, leafReaderContexts, knnWeight, perLeafResults);
+        }
+
         TopDocs[] topDocs = new TopDocs[perLeafResults.size()];
         for (int i = 0; i < perLeafResults.size(); i++) {
             topDocs[i] = ResultUtil.resultMapToTopDocs(perLeafResults.get(i), leafReaderContexts.get(i).docBase);
         }
 
-        TopDocs topK = TopDocs.merge(knnQuery.getK(), topDocs);
+        long sum = 0;
+        for (TopDocs topDoc : topDocs) {
+            sum += topDoc.totalHits.value;
+        }
+        TopDocs topK = TopDocs.merge((int) sum, topDocs);
         if (topK.scoreDocs.length == 0) {
             return new MatchNoDocsQuery().createWeight(indexSearcher, scoreMode, boost);
         }
         return createDocAndScoreQuery(reader, topK).createWeight(indexSearcher, scoreMode, boost);
+    }
+
+    private List<Map<Integer, Float>> retrieveAll(final IndexSearcher indexSearcher,
+                                  List<LeafReaderContext> leafReaderContexts,
+                                  KNNWeight knnWeight,
+                                  List<Map<Integer, Float>> perLeafResults
+    ) throws IOException {
+        List<Callable<Map<Integer, Float>>> rescoreTasks = new ArrayList<>(leafReaderContexts.size());
+        for (int i = 0; i < perLeafResults.size(); i++) {
+            LeafReaderContext leafReaderContext = leafReaderContexts.get(i);
+            int finalI = i;
+            rescoreTasks.add(() -> {
+                BitSet convertedBitSet = getAllSiblings(leafReaderContext, perLeafResults.get(finalI));
+                final ExactSearcher.ExactSearcherContext exactSearcherContext = ExactSearcher.ExactSearcherContext.builder()
+                    .matchedDocs(convertedBitSet)
+                    // setting to false because in re-scoring we want to do exact search on full precision vectors
+                    .useQuantizedVectorsForSearch(false)
+                    .k(1000)
+                    .isParentHits(false)
+                    .knnQuery(knnQuery)
+                    .build();
+                return knnWeight.exactSearch(leafReaderContext, exactSearcherContext);
+            });
+        }
+        return indexSearcher.getTaskExecutor().invokeAll(rescoreTasks);
+    }
+
+    private BitSet getAllSiblings(final LeafReaderContext leafReaderContext, final Map<Integer, Float> integerFloatMap) throws IOException {
+        if (integerFloatMap.isEmpty()) {
+            return BitSet.of(DocIdSetIterator.empty(), 0);
+        }
+        final int maxDoc = Collections.max(integerFloatMap.keySet());
+        BitSet parentBitSet = knnQuery.getParentsFilter().getBitSet(leafReaderContext);
+        final int maxParentDoc = parentBitSet.nextSetBit(maxDoc) + 1;
+        return BitSet.of(resultMapToDocIds(leafReaderContext, integerFloatMap, maxParentDoc), maxParentDoc);
+    }
+
+    public DocIdSetIterator resultMapToDocIds(final LeafReaderContext leafReaderContext, Map<Integer, Float> resultMap, final int maxDoc) throws IOException {
+        if (resultMap.isEmpty()) {
+            return DocIdSetIterator.empty();
+        }
+        final DocIdSetBuilder docIdSetBuilder = new DocIdSetBuilder(maxDoc);
+        final DocIdSetBuilder.BulkAdder setAdder = docIdSetBuilder.grow(maxDoc - resultMap.size());
+        BitSet parentBitSet = knnQuery.getParentsFilter().getBitSet(leafReaderContext);
+        resultMap.keySet().forEach(key -> {
+            for (int i = parentBitSet.prevSetBit(key) + 1; i < parentBitSet.nextSetBit(key); i++) {
+                setAdder.add(i);
+            }
+        });
+        return docIdSetBuilder.build().iterator();
     }
 
     private List<Map<Integer, Float>> doSearch(

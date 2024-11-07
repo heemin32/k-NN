@@ -15,6 +15,7 @@ import org.apache.lucene.search.join.DiversifyingChildrenFloatKnnVectorQuery;
 import org.opensearch.index.query.QueryShardContext;
 import org.opensearch.knn.index.VectorDataType;
 import org.opensearch.knn.index.engine.KNNEngine;
+import org.opensearch.knn.index.query.nativelib.LuceneEngineKNNVectorQuery;
 import org.opensearch.knn.index.query.nativelib.NativeEngineKnnVectorQuery;
 import org.opensearch.knn.index.query.rescore.RescoreContext;
 
@@ -95,7 +96,8 @@ public class KNNQueryFactory extends BaseQueryFactory {
                         .rescoreContext(rescoreContext)
                         .build();
             }
-            return createQueryRequest.getRescoreContext().isPresent() ? new NativeEngineKnnVectorQuery(knnQuery) : knnQuery;
+//            return createQueryRequest.getRescoreContext().isPresent() ? new NativeEngineKnnVectorQuery(knnQuery) : knnQuery;
+            return new NativeEngineKnnVectorQuery(knnQuery);
         }
 
         Integer requestEfSearch = null;
@@ -162,7 +164,7 @@ public class KNNQueryFactory extends BaseQueryFactory {
         if (parentFilter == null) {
             return new KnnFloatVectorQuery(fieldName, floatVector, k, filterQuery);
         } else {
-            return new DiversifyingChildrenFloatKnnVectorQuery(fieldName, floatVector, filterQuery, k, parentFilter);
+            return new LuceneEngineKNNVectorQuery(fieldName, floatVector, filterQuery, k, parentFilter);
         }
     }
 }
