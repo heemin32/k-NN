@@ -6,6 +6,7 @@
 package org.opensearch.knn.index.query;
 
 import com.google.common.annotations.VisibleForTesting;
+import lombok.Getter;
 import lombok.extern.log4j.Log4j2;
 import org.apache.lucene.index.FieldInfo;
 import org.apache.lucene.index.LeafReaderContext;
@@ -66,6 +67,7 @@ public class KNNWeight extends Weight {
     private final float boost;
 
     private final NativeMemoryCacheManager nativeMemoryCacheManager;
+    @Getter
     private final Weight filterWeight;
     private final ExactSearcher exactSearcher;
 
@@ -140,14 +142,14 @@ public class KNNWeight extends Weight {
          * This improves the recall.
          */
         if (isFilteredExactSearchPreferred(cardinality)) {
-            return doExactSearch(context, filterBitSet, k);
+            return doExactSearch(context, new BitSetIterator(filterBitSet, filterBitSet.cardinality()), k);
         }
         Map<Integer, Float> docIdsToScoreMap = doANNSearch(context, filterBitSet, cardinality, k);
         // See whether we have to perform exact search based on approx search results
         // This is required if there are no native engine files or if approximate search returned
         // results less than K, though we have more than k filtered docs
         if (isExactSearchRequire(context, cardinality, docIdsToScoreMap.size())) {
-            final BitSet docs = filterWeight != null ? filterBitSet : null;
+            final BitSetIterator docs = filterWeight != null ? new BitSetIterator(filterBitSet, filterBitSet.cardinality()) : null;
             return doExactSearch(context, docs, k);
         }
         return docIdsToScoreMap;
@@ -205,17 +207,16 @@ public class KNNWeight extends Weight {
         return intArray;
     }
 
-    private Map<Integer, Float> doExactSearch(final LeafReaderContext context, final BitSet acceptedDocs, int k) throws IOException {
+    private Map<Integer, Float> doExactSearch(final LeafReaderContext context, final DocIdSetIterator acceptedDocs, int k)
+        throws IOException {
         final ExactSearcherContextBuilder exactSearcherContextBuilder = ExactSearcher.ExactSearcherContext.builder()
             .isParentHits(true)
             .k(k)
             // setting to true, so that if quantization details are present we want to do search on the quantized
             // vectors as this flow is used in first pass of search.
             .useQuantizedVectorsForSearch(true)
-            .knnQuery(knnQuery);
-        if (acceptedDocs != null) {
-            exactSearcherContextBuilder.matchedDocs(acceptedDocs);
-        }
+            .knnQuery(knnQuery)
+            .matchedDocs(acceptedDocs);
         return exactSearch(context, exactSearcherContextBuilder.build());
     }
 

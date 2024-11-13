@@ -15,6 +15,8 @@ import org.apache.lucene.search.join.DiversifyingChildrenFloatKnnVectorQuery;
 import org.opensearch.index.query.QueryShardContext;
 import org.opensearch.knn.index.VectorDataType;
 import org.opensearch.knn.index.engine.KNNEngine;
+import org.opensearch.knn.index.query.common.QueryUtils;
+import org.opensearch.knn.index.query.lucenelib.NestedKnnVectorQueryFactory;
 import org.opensearch.knn.index.query.nativelib.NativeEngineKnnVectorQuery;
 import org.opensearch.knn.index.query.rescore.RescoreContext;
 
@@ -24,12 +26,14 @@ import java.util.Map;
 import static org.opensearch.knn.common.KNNConstants.METHOD_PARAMETER_EF_SEARCH;
 import static org.opensearch.knn.common.KNNConstants.VECTOR_DATA_TYPE_FIELD;
 import static org.opensearch.knn.index.VectorDataType.SUPPORTED_VECTOR_DATA_TYPES;
+import static org.opensearch.knn.index.engine.KNNEngine.ENGINES_SUPPORTING_MULTI_VECTORS;
 
 /**
  * Creates the Lucene k-NN queries
  */
 @Log4j2
 public class KNNQueryFactory extends BaseQueryFactory {
+    private static final QueryUtils QUERY_UTILS = new QueryUtils();
 
     /**
      * Creates a Lucene query for a particular engine.
@@ -48,11 +52,14 @@ public class KNNQueryFactory extends BaseQueryFactory {
         final Query filterQuery = getFilterQuery(createQueryRequest);
         final Map<String, ?> methodParameters = createQueryRequest.getMethodParameters();
         final RescoreContext rescoreContext = createQueryRequest.getRescoreContext().orElse(null);
+        final KNNEngine knnEngine = createQueryRequest.getKnnEngine();
 
         BitSetProducer parentFilter = null;
+        boolean isInnerHitQuery = false;
         if (createQueryRequest.getContext().isPresent()) {
             QueryShardContext context = createQueryRequest.getContext().get();
             parentFilter = context.getParentFilter();
+            isInnerHitQuery = context.isInnerHitQuery();
         }
 
         if (KNNEngine.getEnginesThatCreateCustomSegmentFiles().contains(createQueryRequest.getKnnEngine())) {
@@ -95,7 +102,14 @@ public class KNNQueryFactory extends BaseQueryFactory {
                         .rescoreContext(rescoreContext)
                         .build();
             }
-            return createQueryRequest.getRescoreContext().isPresent() ? new NativeEngineKnnVectorQuery(knnQuery) : knnQuery;
+
+            if (createQueryRequest.getRescoreContext().isPresent()) {
+                return new NativeEngineKnnVectorQuery(knnQuery, QUERY_UTILS, isInnerHitQuery);
+            } else if (ENGINES_SUPPORTING_MULTI_VECTORS.contains(knnEngine) && isInnerHitQuery) {
+                return new NativeEngineKnnVectorQuery(knnQuery, QUERY_UTILS, isInnerHitQuery);
+            } else {
+                return knnQuery;
+            }
         }
 
         Integer requestEfSearch = null;
@@ -106,9 +120,9 @@ public class KNNQueryFactory extends BaseQueryFactory {
         log.debug(String.format("Creating Lucene k-NN query for index: %s \"\", field: %s \"\", k: %d", indexName, fieldName, k));
         switch (vectorDataType) {
             case BYTE:
-                return getKnnByteVectorQuery(fieldName, byteVector, luceneK, filterQuery, parentFilter);
+                return getKnnByteVectorQuery(fieldName, byteVector, luceneK, filterQuery, parentFilter, isInnerHitQuery);
             case FLOAT:
-                return getKnnFloatVectorQuery(fieldName, vector, luceneK, filterQuery, parentFilter);
+                return getKnnFloatVectorQuery(fieldName, vector, luceneK, filterQuery, parentFilter, isInnerHitQuery);
             default:
                 throw new IllegalArgumentException(
                     String.format(
@@ -139,12 +153,21 @@ public class KNNQueryFactory extends BaseQueryFactory {
         final byte[] byteVector,
         final int k,
         final Query filterQuery,
-        final BitSetProducer parentFilter
+        final BitSetProducer parentFilter,
+        final boolean isInnerHitQuery
     ) {
         if (parentFilter == null) {
+            assert isInnerHitQuery == false;
             return new KnnByteVectorQuery(fieldName, byteVector, k, filterQuery);
         } else {
-            return new DiversifyingChildrenByteKnnVectorQuery(fieldName, byteVector, filterQuery, k, parentFilter);
+            return NestedKnnVectorQueryFactory.createNestedKnnVectorQuery(
+                fieldName,
+                byteVector,
+                k,
+                filterQuery,
+                parentFilter,
+                isInnerHitQuery
+            );
         }
     }
 
@@ -157,12 +180,20 @@ public class KNNQueryFactory extends BaseQueryFactory {
         final float[] floatVector,
         final int k,
         final Query filterQuery,
-        final BitSetProducer parentFilter
+        final BitSetProducer parentFilter,
+        final boolean isInnerHitQuery
     ) {
         if (parentFilter == null) {
             return new KnnFloatVectorQuery(fieldName, floatVector, k, filterQuery);
         } else {
-            return new DiversifyingChildrenFloatKnnVectorQuery(fieldName, floatVector, filterQuery, k, parentFilter);
+            return NestedKnnVectorQueryFactory.createNestedKnnVectorQuery(
+                fieldName,
+                floatVector,
+                k,
+                filterQuery,
+                parentFilter,
+                isInnerHitQuery
+            );
         }
     }
 }

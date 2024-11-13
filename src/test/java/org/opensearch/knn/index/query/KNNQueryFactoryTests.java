@@ -29,6 +29,7 @@ import org.opensearch.knn.KNNTestCase;
 import org.opensearch.knn.index.KNNSettings;
 import org.opensearch.knn.index.VectorDataType;
 import org.opensearch.knn.index.engine.KNNEngine;
+import org.opensearch.knn.index.query.lucenelib.NestedKnnVectorInnerHitQuery;
 import org.opensearch.knn.index.query.nativelib.NativeEngineKnnVectorQuery;
 import org.opensearch.knn.index.query.rescore.RescoreContext;
 
@@ -481,5 +482,40 @@ public class KNNQueryFactoryTests extends KNNTestCase {
 
         // Then
         assertEquals(expected, ((NativeEngineKnnVectorQuery) query).getKnnQuery());
+    }
+
+    public void testCreate_whenInnerHitQueryWithFaiss_thenCreateNativeEngineKNNVectorQuery() {
+        testInnerHitQuery(KNNEngine.FAISS, NativeEngineKnnVectorQuery.class, VectorDataType.values()[randomInt(2)]);
+    }
+
+    public void testCreate_whenInnerHitQueryWithNmslib_thenCreateKNNQuery() {
+        testInnerHitQuery(KNNEngine.NMSLIB, KNNQuery.class, VectorDataType.FLOAT);
+    }
+
+    public void testCreate_whenInnerHitQueryWithLucene_thenCreateNestedKnnVectorInnerHitQuery() {
+        testInnerHitQuery(KNNEngine.LUCENE, NestedKnnVectorInnerHitQuery.class, VectorDataType.BYTE);
+        testInnerHitQuery(KNNEngine.LUCENE, NestedKnnVectorInnerHitQuery.class, VectorDataType.FLOAT);
+    }
+
+    private void testInnerHitQuery(KNNEngine knnEngine, Class klass, VectorDataType vectorDataType) {
+        QueryShardContext queryShardContext = mock(QueryShardContext.class);
+        when(queryShardContext.isInnerHitQuery()).thenReturn(true);
+        BitSetProducer parentFilter = mock(BitSetProducer.class);
+        when(queryShardContext.getParentFilter()).thenReturn(parentFilter);
+        final KNNQueryFactory.CreateQueryRequest createQueryRequest = KNNQueryFactory.CreateQueryRequest.builder()
+            .knnEngine(knnEngine)
+            .indexName(testIndexName)
+            .fieldName(testFieldName)
+            .vector(testQueryVector)
+            .vector(testQueryVector)
+            .byteVector(testByteQueryVector)
+            .vectorDataType(vectorDataType)
+            .k(testK)
+            .context(queryShardContext)
+            .build();
+        Query query = KNNQueryFactory.create(createQueryRequest);
+
+        // Then
+        assertEquals(klass, query.getClass());
     }
 }

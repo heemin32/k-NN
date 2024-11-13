@@ -9,7 +9,6 @@ import org.apache.lucene.search.DocIdSetIterator;
 import org.apache.lucene.search.ScoreDoc;
 import org.apache.lucene.search.TopDocs;
 import org.apache.lucene.util.BitSet;
-import org.junit.Assert;
 import org.opensearch.knn.KNNTestCase;
 
 import java.io.IOException;
@@ -42,22 +41,14 @@ public class ResultUtilTests extends KNNTestCase {
         assertTopK(initialLeafResults, reducedLeafResults, firstPassK);
     }
 
-    public void testResultMapToMatchBitSet() throws IOException {
+    public void testResultMapToDocIds() throws IOException {
         int firstPassK = 35;
         Map<Integer, Float> perLeafResults = getRandomResults(firstPassK);
-        BitSet resultBitset = ResultUtil.resultMapToMatchBitSet(perLeafResults);
-        assertResultMapToMatchBitSet(perLeafResults, resultBitset);
+        DocIdSetIterator resultDocIdSetIterator = ResultUtil.resultMapToDocIds(perLeafResults);
+        assertResultMapToDocIdSetIterator(perLeafResults, resultDocIdSetIterator);
     }
 
-    public void testResultMapToMatchBitSet_whenResultMapEmpty_thenReturnEmptyOptional() throws IOException {
-        BitSet resultBitset = ResultUtil.resultMapToMatchBitSet(Collections.emptyMap());
-        Assert.assertNull(resultBitset);
-
-        BitSet resultBitset2 = ResultUtil.resultMapToMatchBitSet(null);
-        Assert.assertNull(resultBitset2);
-    }
-
-    public void testResultMapToDocIds() throws IOException {
+    public void testResultMapToDocIdsWithMaxDoc() throws IOException {
         int firstPassK = 42;
         Map<Integer, Float> perLeafResults = getRandomResults(firstPassK);
         final int maxDoc = Collections.max(perLeafResults.keySet()) + 1;

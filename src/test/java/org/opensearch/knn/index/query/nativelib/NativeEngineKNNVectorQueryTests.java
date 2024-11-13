@@ -13,23 +13,23 @@ import org.apache.lucene.index.LeafReaderContext;
 import org.apache.lucene.search.IndexSearcher;
 import org.apache.lucene.search.MatchNoDocsQuery;
 import org.apache.lucene.search.Query;
+import org.apache.lucene.search.ScoreDoc;
 import org.apache.lucene.search.ScoreMode;
 import org.apache.lucene.search.TaskExecutor;
 import org.apache.lucene.search.TopDocs;
-import org.apache.lucene.search.Weight;
-import org.apache.lucene.search.ScoreDoc;
 import org.apache.lucene.search.TotalHits;
+import org.apache.lucene.search.Weight;
 import org.apache.lucene.util.Bits;
-import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.MockedStatic;
-import org.mockito.invocation.InvocationOnMock;
 import org.opensearch.cluster.ClusterState;
 import org.opensearch.cluster.service.ClusterService;
 import org.opensearch.knn.index.KNNSettings;
 import org.opensearch.knn.index.query.KNNQuery;
 import org.opensearch.knn.index.query.KNNWeight;
 import org.opensearch.knn.index.query.ResultUtil;
+import org.opensearch.knn.index.query.common.DocAndScoreQuery;
+import org.opensearch.knn.index.query.common.QueryUtils;
 import org.opensearch.knn.index.query.rescore.RescoreContext;
 import org.opensearch.test.OpenSearchTestCase;
 
@@ -40,11 +40,13 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.Callable;
 
-import static org.mockito.ArgumentMatchers.*;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
-import static org.mockito.Mockito.when;
 import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.when;
 import static org.mockito.MockitoAnnotations.openMocks;
 
 public class NativeEngineKNNVectorQueryTests extends OpenSearchTestCase {
@@ -73,14 +75,14 @@ public class NativeEngineKNNVectorQueryTests extends OpenSearchTestCase {
     @Mock
     private ClusterService clusterService;
 
-    @InjectMocks
     private NativeEngineKnnVectorQuery objectUnderTest;
 
     @Override
     public void setUp() throws Exception {
         super.setUp();
         openMocks(this);
-
+        QueryUtils queryUtils = new QueryUtils();
+        objectUnderTest = new NativeEngineKnnVectorQuery(knnQuery, queryUtils, false);
         when(leaf1.reader()).thenReturn(leafReader1);
         when(leaf2.reader()).thenReturn(leafReader2);
 
@@ -218,54 +220,5 @@ public class NativeEngineKNNVectorQueryTests extends OpenSearchTestCase {
 
         // Then
         assertEquals(new MatchNoDocsQuery(), actual.getQuery());
-    }
-
-    @SneakyThrows
-    public void testRescore() {
-        // Given
-        List<LeafReaderContext> leaves = List.of(leaf1, leaf2);
-        when(reader.leaves()).thenReturn(leaves);
-
-        int k = 2;
-        int firstPassK = 100;
-        Map<Integer, Float> initialLeaf1Results = new HashMap<>(Map.of(0, 21f, 1, 19f, 2, 17f, 3, 15f));
-        Map<Integer, Float> initialLeaf2Results = new HashMap<>(Map.of(0, 20f, 1, 18f, 2, 16f, 3, 14f));
-        Map<Integer, Float> rescoredLeaf1Results = new HashMap<>(Map.of(0, 18f, 1, 20f));
-        Map<Integer, Float> rescoredLeaf2Results = new HashMap<>(Map.of(0, 21f));
-        TopDocs topDocs1 = ResultUtil.resultMapToTopDocs(Map.of(1, 20f), 0);
-        TopDocs topDocs2 = ResultUtil.resultMapToTopDocs(Map.of(0, 21f), 4);
-        Query expected = new DocAndScoreQuery(2, new int[] { 1, 4 }, new float[] { 20f, 21f }, new int[] { 0, 4, 2 }, 1);
-
-        when(indexReaderContext.id()).thenReturn(1);
-        when(knnQuery.getRescoreContext()).thenReturn(RescoreContext.builder().oversampleFactor(1.5f).build());
-        when(knnQuery.getK()).thenReturn(k);
-        when(knnWeight.getQuery()).thenReturn(knnQuery);
-        when(knnWeight.searchLeaf(leaf1, firstPassK)).thenReturn(initialLeaf1Results);
-        when(knnWeight.searchLeaf(leaf2, firstPassK)).thenReturn(initialLeaf2Results);
-
-        when(knnWeight.exactSearch(eq(leaf1), any())).thenReturn(rescoredLeaf1Results);
-        when(knnWeight.exactSearch(eq(leaf2), any())).thenReturn(rescoredLeaf2Results);
-
-        try (
-            MockedStatic<KNNSettings> mockedKnnSettings = mockStatic(KNNSettings.class);
-            MockedStatic<ResultUtil> mockedResultUtil = mockStatic(ResultUtil.class)
-        ) {
-
-            // When shard-level re-scoring is enabled
-            mockedKnnSettings.when(() -> KNNSettings.isShardLevelRescoringEnabledForDiskBasedVector(any())).thenReturn(true);
-
-            mockedResultUtil.when(() -> ResultUtil.reduceToTopK(any(), anyInt())).thenAnswer(InvocationOnMock::callRealMethod);
-            mockedResultUtil.when(() -> ResultUtil.resultMapToMatchBitSet(any())).thenAnswer(InvocationOnMock::callRealMethod);
-            mockedResultUtil.when(() -> ResultUtil.resultMapToDocIds(any(), anyInt())).thenAnswer(InvocationOnMock::callRealMethod);
-
-            mockedResultUtil.when(() -> ResultUtil.resultMapToTopDocs(eq(rescoredLeaf1Results), anyInt())).thenAnswer(t -> topDocs1);
-            mockedResultUtil.when(() -> ResultUtil.resultMapToTopDocs(eq(rescoredLeaf2Results), anyInt())).thenAnswer(t -> topDocs2);
-            try (MockedStatic<NativeEngineKnnVectorQuery> mockedStaticNativeKnnVectorQuery = mockStatic(NativeEngineKnnVectorQuery.class)) {
-                mockedStaticNativeKnnVectorQuery.when(() -> NativeEngineKnnVectorQuery.findSegmentStarts(any(), any()))
-                    .thenReturn(new int[] { 0, 4, 2 });
-                Weight actual = objectUnderTest.createWeight(searcher, ScoreMode.COMPLETE, 1);
-                assertEquals(expected, actual.getQuery());
-            }
-        }
     }
 }
