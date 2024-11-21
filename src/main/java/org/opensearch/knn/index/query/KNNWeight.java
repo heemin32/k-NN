@@ -15,38 +15,34 @@ import org.apache.lucene.search.Explanation;
 import org.apache.lucene.search.FilteredDocIdSetIterator;
 import org.apache.lucene.search.Scorer;
 import org.apache.lucene.search.Weight;
-import org.apache.lucene.store.FSDirectory;
-import org.apache.lucene.store.FilterDirectory;
 import org.apache.lucene.util.BitSet;
 import org.apache.lucene.util.BitSetIterator;
 import org.apache.lucene.util.Bits;
 import org.apache.lucene.util.FixedBitSet;
-import org.opensearch.common.io.PathUtils;
 import org.opensearch.common.lucene.Lucene;
+import org.opensearch.knn.common.FieldInfoExtractor;
 import org.opensearch.knn.common.KNNConstants;
 import org.opensearch.knn.index.KNNSettings;
 import org.opensearch.knn.index.SpaceType;
 import org.opensearch.knn.index.VectorDataType;
-import org.opensearch.knn.index.codec.KNN990Codec.QuantizationConfigKNNCollector;
+import org.opensearch.knn.index.codec.util.KNNCodecUtil;
+import org.opensearch.knn.index.codec.util.NativeMemoryCacheKeyHelper;
 import org.opensearch.knn.index.memory.NativeMemoryAllocation;
 import org.opensearch.knn.index.memory.NativeMemoryCacheManager;
 import org.opensearch.knn.index.memory.NativeMemoryEntryContext;
 import org.opensearch.knn.index.memory.NativeMemoryLoadStrategy;
 import org.opensearch.knn.index.engine.KNNEngine;
 import org.opensearch.knn.index.quantizationservice.QuantizationService;
+import org.opensearch.knn.index.query.ExactSearcher.ExactSearcherContext.ExactSearcherContextBuilder;
 import org.opensearch.knn.indices.ModelDao;
 import org.opensearch.knn.indices.ModelMetadata;
 import org.opensearch.knn.indices.ModelUtil;
 import org.opensearch.knn.jni.JNIService;
 import org.opensearch.knn.plugin.stats.KNNCounter;
-import org.opensearch.knn.quantization.models.quantizationOutput.QuantizationOutput;
-import org.opensearch.knn.quantization.models.quantizationParams.QuantizationParams;
 
 import java.io.IOException;
-import java.nio.file.Path;
 import java.util.Arrays;
 import java.util.Collections;
-import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ExecutionException;
@@ -97,8 +93,13 @@ public class KNNWeight extends Weight {
     }
 
     public static void initialize(ModelDao modelDao) {
+        initialize(modelDao, new ExactSearcher(modelDao));
+    }
+
+    @VisibleForTesting
+    static void initialize(ModelDao modelDao, ExactSearcher exactSearcher) {
         KNNWeight.modelDao = modelDao;
-        KNNWeight.DEFAULT_EXACT_SEARCHER = new ExactSearcher(modelDao);
+        KNNWeight.DEFAULT_EXACT_SEARCHER = exactSearcher;
     }
 
     @Override
@@ -133,33 +134,21 @@ public class KNNWeight extends Weight {
         if (filterWeight != null && cardinality == 0) {
             return Collections.emptyMap();
         }
-
         /*
-         * The idea for this optimization is to get K results, we need to atleast look at K vectors in the HNSW graph
+         * The idea for this optimization is to get K results, we need to at least look at K vectors in the HNSW graph
          * . Hence, if filtered results are less than K and filter query is present we should shift to exact search.
          * This improves the recall.
          */
-        Map<Integer, Float> docIdsToScoreMap;
-        if (filterWeight != null && canDoExactSearch(cardinality)) {
-            docIdsToScoreMap = exactSearch(context, filterBitSet, true, k);
-        } else {
-            docIdsToScoreMap = doANNSearch(context, filterBitSet, cardinality, k);
-            if (docIdsToScoreMap == null) {
-                return Collections.emptyMap();
-            }
-            if (canDoExactSearchAfterANNSearch(cardinality, docIdsToScoreMap.size())) {
-                log.debug(
-                    "Doing ExactSearch after doing ANNSearch as the number of documents returned are less than "
-                        + "K, even when we have more than K filtered Ids. K: {}, ANNResults: {}, filteredIdCount: {}",
-                    k,
-                    docIdsToScoreMap.size(),
-                    cardinality
-                );
-                docIdsToScoreMap = exactSearch(context, filterBitSet, true, k);
-            }
+        if (isFilteredExactSearchPreferred(cardinality)) {
+            return doExactSearch(context, filterBitSet, k);
         }
-        if (docIdsToScoreMap.isEmpty()) {
-            return Collections.emptyMap();
+        Map<Integer, Float> docIdsToScoreMap = doANNSearch(context, filterBitSet, cardinality, k);
+        // See whether we have to perform exact search based on approx search results
+        // This is required if there are no native engine files or if approximate search returned
+        // results less than K, though we have more than k filtered docs
+        if (isExactSearchRequire(context, cardinality, docIdsToScoreMap.size())) {
+            final BitSet docs = filterWeight != null ? filterBitSet : null;
+            return doExactSearch(context, docs, k);
         }
         return docIdsToScoreMap;
     }
@@ -216,6 +205,20 @@ public class KNNWeight extends Weight {
         return intArray;
     }
 
+    private Map<Integer, Float> doExactSearch(final LeafReaderContext context, final BitSet acceptedDocs, int k) throws IOException {
+        final ExactSearcherContextBuilder exactSearcherContextBuilder = ExactSearcher.ExactSearcherContext.builder()
+            .isParentHits(true)
+            .k(k)
+            // setting to true, so that if quantization details are present we want to do search on the quantized
+            // vectors as this flow is used in first pass of search.
+            .useQuantizedVectorsForSearch(true)
+            .knnQuery(knnQuery);
+        if (acceptedDocs != null) {
+            exactSearcherContextBuilder.matchedDocs(acceptedDocs);
+        }
+        return exactSearch(context, exactSearcherContextBuilder.build());
+    }
+
     private Map<Integer, Float> doANNSearch(
         final LeafReaderContext context,
         final BitSet filterIdsBitSet,
@@ -223,13 +226,12 @@ public class KNNWeight extends Weight {
         final int k
     ) throws IOException {
         final SegmentReader reader = Lucene.segmentReader(context.reader());
-        String directory = ((FSDirectory) FilterDirectory.unwrap(reader.directory())).getDirectory().toString();
 
         FieldInfo fieldInfo = reader.getFieldInfos().fieldInfo(knnQuery.getField());
 
         if (fieldInfo == null) {
             log.debug("[KNN] Field info not found for {}:{}", knnQuery.getField(), reader.getSegmentName());
-            return null;
+            return Collections.emptyMap();
         }
 
         KNNEngine knnEngine;
@@ -249,7 +251,7 @@ public class KNNWeight extends Weight {
             spaceType = modelMetadata.getSpaceType();
             vectorDataType = modelMetadata.getVectorDataType();
         } else {
-            String engineName = fieldInfo.attributes().getOrDefault(KNN_ENGINE, KNNEngine.NMSLIB.getName());
+            String engineName = fieldInfo.attributes().getOrDefault(KNN_ENGINE, KNNEngine.DEFAULT.getName());
             knnEngine = KNNEngine.getEngine(engineName);
             String spaceTypeName = fieldInfo.attributes().getOrDefault(SPACE_TYPE, SpaceType.L2.getValue());
             spaceType = SpaceType.getSpace(spaceTypeName);
@@ -258,18 +260,23 @@ public class KNNWeight extends Weight {
             );
         }
 
-        QuantizationParams quantizationParams = quantizationService.getQuantizationParams(fieldInfo);
-
+        final SegmentLevelQuantizationInfo segmentLevelQuantizationInfo = SegmentLevelQuantizationInfo.build(
+            reader,
+            fieldInfo,
+            knnQuery.getField()
+        );
         // TODO: Change type of vector once more quantization methods are supported
-        byte[] quantizedVector = getQuantizedVector(quantizationParams, reader, fieldInfo);
+        final byte[] quantizedVector = SegmentLevelQuantizationUtil.quantizeVector(knnQuery.getQueryVector(), segmentLevelQuantizationInfo);
 
-        List<String> engineFiles = getEngineFiles(reader, knnEngine.getExtension());
+        List<String> engineFiles = KNNCodecUtil.getEngineFiles(knnEngine.getExtension(), knnQuery.getField(), reader.getSegmentInfo().info);
         if (engineFiles.isEmpty()) {
-            log.debug("[KNN] No engine index found for field {} for segment {}", knnQuery.getField(), reader.getSegmentName());
-            return null;
+            log.debug("[KNN] No native engine files found for field {} for segment {}", knnQuery.getField(), reader.getSegmentName());
+            return Collections.emptyMap();
         }
 
-        Path indexPath = PathUtils.get(directory, engineFiles.get(0));
+        final String vectorIndexFileName = engineFiles.get(0);
+        final String cacheKey = NativeMemoryCacheKeyHelper.constructCacheKey(vectorIndexFileName, reader.getSegmentInfo().info);
+
         final KNNQueryResult[] results;
         KNNCounter.GRAPH_QUERY_REQUESTS.increment();
 
@@ -278,14 +285,15 @@ public class KNNWeight extends Weight {
         try {
             indexAllocation = nativeMemoryCacheManager.get(
                 new NativeMemoryEntryContext.IndexEntryContext(
-                    indexPath.toString(),
+                    reader.directory(),
+                    cacheKey,
                     NativeMemoryLoadStrategy.IndexLoadStrategy.getInstance(),
                     getParametersAtLoading(
                         spaceType,
                         knnEngine,
                         knnQuery.getIndexName(),
                         // TODO: In the future, more vector data types will be supported with quantization
-                        quantizationParams == null ? vectorDataType : VectorDataType.BINARY
+                        quantizedVector == null ? vectorDataType : VectorDataType.BINARY
                     ),
                     knnQuery.getIndexName(),
                     modelId
@@ -303,6 +311,7 @@ public class KNNWeight extends Weight {
         FilterIdsSelector.FilterIdsSelectorType filterType = filterIdsSelector.getFilterType();
         // Now that we have the allocation, we need to readLock it
         indexAllocation.readLock();
+        indexAllocation.incRef();
         try {
             if (indexAllocation.isClosed()) {
                 throw new RuntimeException("Index has already been closed");
@@ -310,11 +319,11 @@ public class KNNWeight extends Weight {
             int[] parentIds = getParentIdsArray(context);
             if (k > 0) {
                 if (knnQuery.getVectorDataType() == VectorDataType.BINARY
-                    || quantizationParams != null && quantizationService.getVectorDataTypeForTransfer(fieldInfo) == VectorDataType.BINARY) {
+                    || quantizedVector != null && quantizationService.getVectorDataTypeForTransfer(fieldInfo) == VectorDataType.BINARY) {
                     results = JNIService.queryBinaryIndex(
                         indexAllocation.getMemoryAddress(),
                         // TODO: In the future, quantizedVector can have other data types than byte
-                        quantizationParams == null ? knnQuery.getByteQueryVector() : quantizedVector,
+                        quantizedVector == null ? knnQuery.getByteQueryVector() : quantizedVector,
                         k,
                         knnQuery.getMethodParameters(),
                         knnEngine,
@@ -352,55 +361,31 @@ public class KNNWeight extends Weight {
             throw new RuntimeException(e);
         } finally {
             indexAllocation.readUnlock();
+            indexAllocation.decRef();
         }
-
-        /*
-         * Scores represent the distance of the documents with respect to given query vector.
-         * Lesser the score, the closer the document is to the query vector.
-         * Since by default results are retrieved in the descending order of scores, to get the nearest
-         * neighbors we are inverting the scores.
-         */
         if (results.length == 0) {
             log.debug("[KNN] Query yielded 0 results");
-            return null;
+            return Collections.emptyMap();
         }
 
+        if (quantizedVector != null) {
+            return Arrays.stream(results)
+                .collect(Collectors.toMap(KNNQueryResult::getId, result -> knnEngine.score(result.getScore(), SpaceType.HAMMING)));
+        }
         return Arrays.stream(results)
             .collect(Collectors.toMap(KNNQueryResult::getId, result -> knnEngine.score(result.getScore(), spaceType)));
     }
 
-    @VisibleForTesting
-    List<String> getEngineFiles(SegmentReader reader, String extension) throws IOException {
-        /*
-         * In case of compound file, extension would be <engine-extension> + c otherwise <engine-extension>
-         */
-        String engineExtension = reader.getSegmentInfo().info.getUseCompoundFile()
-            ? extension + KNNConstants.COMPOUND_EXTENSION
-            : extension;
-        String engineSuffix = knnQuery.getField() + engineExtension;
-        String underLineEngineSuffix = "_" + engineSuffix;
-        List<String> engineFiles = reader.getSegmentInfo()
-            .files()
-            .stream()
-            .filter(fileName -> fileName.endsWith(underLineEngineSuffix))
-            .sorted(Comparator.comparingInt(String::length))
-            .collect(Collectors.toList());
-        return engineFiles;
-    }
-
     /**
      * Execute exact search for the given matched doc ids and return the results as a map of docId to score.
-     *
-     * @param leafReaderContext The leaf reader context for the current segment.
-     * @param matchSet The filterIds to search for.
-     * @param isParentHits Whether the matchedDocs contains parent ids or child ids.
-     * @param k The number of results to return.
      * @return Map of docId to score for the exact search results.
      * @throws IOException If an error occurs during the search.
      */
-    public Map<Integer, Float> exactSearch(final LeafReaderContext leafReaderContext, final BitSet matchSet, boolean isParentHits, int k)
-        throws IOException {
-        return exactSearcher.searchLeaf(leafReaderContext, matchSet, knnQuery, k, isParentHits);
+    public Map<Integer, Float> exactSearch(
+        final LeafReaderContext leafReaderContext,
+        final ExactSearcher.ExactSearcherContext exactSearcherContext
+    ) throws IOException {
+        return exactSearcher.searchLeaf(leafReaderContext, exactSearcherContext);
     }
 
     @Override
@@ -413,18 +398,18 @@ public class KNNWeight extends Weight {
         return -score + 1;
     }
 
-    private boolean canDoExactSearch(final int filterIdsCount) {
+    private boolean isFilteredExactSearchPreferred(final int filterIdsCount) {
+        if (filterWeight == null) {
+            return false;
+        }
         log.debug(
             "Info for doing exact search filterIdsLength : {}, Threshold value: {}",
             filterIdsCount,
             KNNSettings.getFilteredExactSearchThreshold(knnQuery.getIndexName())
         );
-        if (knnQuery.getRadius() != null) {
-            return false;
-        }
         int filterThresholdValue = KNNSettings.getFilteredExactSearchThreshold(knnQuery.getIndexName());
         // Refer this GitHub around more details https://github.com/opensearch-project/k-NN/issues/1049 on the logic
-        if (filterIdsCount <= knnQuery.getK()) {
+        if (knnQuery.getRadius() == null && filterIdsCount <= knnQuery.getK()) {
             return true;
         }
         // See user has defined Exact Search filtered threshold. if yes, then use that setting.
@@ -453,32 +438,58 @@ public class KNNWeight extends Weight {
     }
 
     /**
-     * This condition mainly checks during filtered search we have more than K elements in filterIds but the ANN
-     * doesn't yeild K nearest neighbors.
+     * This condition mainly checks whether exact search should be performed or not
+     * @param context LeafReaderContext
      * @param filterIdsCount count of filtered Doc ids
      * @param annResultCount Count of Nearest Neighbours we got after doing filtered ANN Search.
      * @return boolean - true if exactSearch needs to be done after ANNSearch.
      */
-    private boolean canDoExactSearchAfterANNSearch(final int filterIdsCount, final int annResultCount) {
+    private boolean isExactSearchRequire(final LeafReaderContext context, final int filterIdsCount, final int annResultCount) {
+        if (annResultCount == 0 && isMissingNativeEngineFiles(context)) {
+            log.debug("Perform exact search after approximate search since no native engine files are available");
+            return true;
+        }
+        if (isFilteredExactSearchRequireAfterANNSearch(filterIdsCount, annResultCount)) {
+            log.debug(
+                "Doing ExactSearch after doing ANNSearch as the number of documents returned are less than "
+                    + "K, even when we have more than K filtered Ids. K: {}, ANNResults: {}, filteredIdCount: {}",
+                this.knnQuery.getK(),
+                annResultCount,
+                filterIdsCount
+            );
+            return true;
+        }
+        return false;
+    }
+
+    /**
+     * This condition mainly checks during filtered search we have more than K elements in filterIds but the ANN
+     * doesn't yield K nearest neighbors.
+     * @param filterIdsCount count of filtered Doc ids
+     * @param annResultCount Count of Nearest Neighbours we got after doing filtered ANN Search.
+     * @return boolean - true if exactSearch needs to be done after ANNSearch.
+     */
+    private boolean isFilteredExactSearchRequireAfterANNSearch(final int filterIdsCount, final int annResultCount) {
         return filterWeight != null && filterIdsCount >= knnQuery.getK() && knnQuery.getK() > annResultCount;
     }
 
-    // TODO: this will eventually return more types than just byte
-    private byte[] getQuantizedVector(QuantizationParams quantizationParams, SegmentReader reader, FieldInfo fieldInfo) throws IOException {
-        if (quantizationParams != null) {
-            QuantizationConfigKNNCollector tempCollector = new QuantizationConfigKNNCollector();
-            reader.searchNearestVectors(knnQuery.getField(), new float[0], tempCollector, null);
-            if (tempCollector.getQuantizationState() == null) {
-                throw new IllegalStateException(String.format("No quantization state found for field %s", fieldInfo.getName()));
-            }
-            QuantizationOutput quantizationOutput = quantizationService.createQuantizationOutput(quantizationParams);
-            // TODO: In the future, byte array will not be the only output type from this method
-            return (byte[]) quantizationService.quantize(
-                tempCollector.getQuantizationState(),
-                knnQuery.getQueryVector(),
-                quantizationOutput
-            );
+    /**
+     * This condition mainly checks whether segments has native engine files or not
+     * @return boolean - false if exactSearch needs to be done since no native engine files are in segments.
+     */
+    private boolean isMissingNativeEngineFiles(LeafReaderContext context) {
+        final SegmentReader reader = Lucene.segmentReader(context.reader());
+        final FieldInfo fieldInfo = reader.getFieldInfos().fieldInfo(knnQuery.getField());
+        // if segment has no documents with at least 1 vector field, field info will be null
+        if (fieldInfo == null) {
+            return false;
         }
-        return null;
+        final KNNEngine knnEngine = FieldInfoExtractor.extractKNNEngine(fieldInfo);
+        final List<String> engineFiles = KNNCodecUtil.getEngineFiles(
+            knnEngine.getExtension(),
+            knnQuery.getField(),
+            reader.getSegmentInfo().info
+        );
+        return engineFiles.isEmpty();
     }
 }

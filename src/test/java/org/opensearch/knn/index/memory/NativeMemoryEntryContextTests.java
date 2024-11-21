@@ -12,22 +12,22 @@
 package org.opensearch.knn.index.memory;
 
 import com.google.common.collect.ImmutableMap;
+import org.apache.lucene.store.Directory;
+import org.apache.lucene.store.IOContext;
+import org.apache.lucene.store.IndexOutput;
+import org.apache.lucene.store.MMapDirectory;
 import org.opensearch.cluster.service.ClusterService;
 import org.opensearch.knn.KNNTestCase;
-import org.opensearch.knn.index.util.IndexUtil;
+import org.opensearch.knn.TestUtils;
+import org.opensearch.knn.index.engine.qframe.QuantizationConfig;
 import org.opensearch.knn.index.VectorDataType;
 import org.opensearch.knn.index.engine.KNNEngine;
 
-import java.io.BufferedOutputStream;
 import java.io.IOException;
-import java.io.OutputStream;
-import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Arrays;
 import java.util.Map;
 
-import static java.nio.file.StandardOpenOption.APPEND;
-import static java.nio.file.StandardOpenOption.CREATE;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
@@ -43,7 +43,8 @@ public class NativeMemoryEntryContextTests extends KNNTestCase {
     public void testIndexEntryContext_load() throws IOException {
         NativeMemoryLoadStrategy.IndexLoadStrategy indexLoadStrategy = mock(NativeMemoryLoadStrategy.IndexLoadStrategy.class);
         NativeMemoryEntryContext.IndexEntryContext indexEntryContext = new NativeMemoryEntryContext.IndexEntryContext(
-            "test",
+            (Directory) null,
+            TestUtils.createFakeNativeMamoryCacheKey("test"),
             indexLoadStrategy,
             null,
             "test"
@@ -55,8 +56,7 @@ public class NativeMemoryEntryContextTests extends KNNTestCase {
             10,
             KNNEngine.DEFAULT,
             "test-path",
-            "test-name",
-            null
+            "test-name"
         );
 
         when(indexLoadStrategy.load(indexEntryContext)).thenReturn(indexAllocation);
@@ -66,34 +66,37 @@ public class NativeMemoryEntryContextTests extends KNNTestCase {
 
     public void testIndexEntryContext_calculateSize() throws IOException {
         // Create a file and write random bytes to it
-        Path tmpFile = createTempFile();
+        final Path tmpDirectory = createTempDir();
+        final Directory directory = new MMapDirectory(tmpDirectory);
+        final String indexFileName = "test.faiss";
         byte[] data = new byte[1024 * 3];
         Arrays.fill(data, (byte) 'c');
 
-        try (OutputStream out = new BufferedOutputStream(Files.newOutputStream(tmpFile, CREATE, APPEND))) {
-            out.write(data, 0, data.length);
-        } catch (IOException x) {
-            fail("Failed to write to file");
+        try (IndexOutput output = directory.createOutput(indexFileName, IOContext.DEFAULT)) {
+            output.writeBytes(data, data.length);
         }
 
         // Get the expected size of this function
-        int expectedSize = IndexUtil.getFileSizeInKB(tmpFile.toAbsolutePath().toString());
+        final long expectedSizeBytes = directory.fileLength(indexFileName);
+        final long expectedSizeKb = expectedSizeBytes / 1024L;
 
         // Check that the indexEntryContext will return the same thing
         NativeMemoryEntryContext.IndexEntryContext indexEntryContext = new NativeMemoryEntryContext.IndexEntryContext(
-            tmpFile.toAbsolutePath().toString(),
+            directory,
+            TestUtils.createFakeNativeMamoryCacheKey(indexFileName),
             null,
             null,
             "test"
         );
 
-        assertEquals(expectedSize, indexEntryContext.calculateSizeInKB().longValue());
+        assertEquals(expectedSizeKb, indexEntryContext.calculateSizeInKB().longValue());
     }
 
     public void testIndexEntryContext_getOpenSearchIndexName() {
         String openSearchIndexName = "test-index";
         NativeMemoryEntryContext.IndexEntryContext indexEntryContext = new NativeMemoryEntryContext.IndexEntryContext(
-            "test",
+            (Directory) null,
+            TestUtils.createFakeNativeMamoryCacheKey("test"),
             null,
             null,
             openSearchIndexName
@@ -105,7 +108,8 @@ public class NativeMemoryEntryContextTests extends KNNTestCase {
     public void testIndexEntryContext_getParameters() {
         Map<String, Object> parameters = ImmutableMap.of("test-1", 10);
         NativeMemoryEntryContext.IndexEntryContext indexEntryContext = new NativeMemoryEntryContext.IndexEntryContext(
-            "test",
+            (Directory) null,
+            TestUtils.createFakeNativeMamoryCacheKey("test"),
             null,
             parameters,
             "test"
@@ -124,7 +128,8 @@ public class NativeMemoryEntryContextTests extends KNNTestCase {
             null,
             0,
             0,
-            VectorDataType.DEFAULT
+            VectorDataType.DEFAULT,
+            QuantizationConfig.EMPTY
         );
 
         NativeMemoryAllocation.TrainingDataAllocation trainingDataAllocation = new NativeMemoryAllocation.TrainingDataAllocation(
@@ -149,7 +154,8 @@ public class NativeMemoryEntryContextTests extends KNNTestCase {
             null,
             0,
             0,
-            VectorDataType.DEFAULT
+            VectorDataType.DEFAULT,
+            QuantizationConfig.EMPTY
         );
 
         assertEquals(trainIndexName, trainingDataEntryContext.getTrainIndexName());
@@ -165,7 +171,8 @@ public class NativeMemoryEntryContextTests extends KNNTestCase {
             null,
             0,
             0,
-            VectorDataType.DEFAULT
+            VectorDataType.DEFAULT,
+            QuantizationConfig.EMPTY
         );
 
         assertEquals(trainFieldName, trainingDataEntryContext.getTrainFieldName());
@@ -181,7 +188,8 @@ public class NativeMemoryEntryContextTests extends KNNTestCase {
             null,
             maxVectorCount,
             0,
-            VectorDataType.DEFAULT
+            VectorDataType.DEFAULT,
+            QuantizationConfig.EMPTY
         );
 
         assertEquals(maxVectorCount, trainingDataEntryContext.getMaxVectorCount());
@@ -197,7 +205,8 @@ public class NativeMemoryEntryContextTests extends KNNTestCase {
             null,
             0,
             searchSize,
-            VectorDataType.DEFAULT
+            VectorDataType.DEFAULT,
+            QuantizationConfig.EMPTY
         );
 
         assertEquals(searchSize, trainingDataEntryContext.getSearchSize());
@@ -213,7 +222,8 @@ public class NativeMemoryEntryContextTests extends KNNTestCase {
             clusterService,
             0,
             0,
-            VectorDataType.DEFAULT
+            VectorDataType.DEFAULT,
+            QuantizationConfig.EMPTY
         );
 
         assertEquals(clusterService, trainingDataEntryContext.getClusterService());

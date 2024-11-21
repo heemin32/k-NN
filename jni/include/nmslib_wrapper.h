@@ -26,12 +26,20 @@ namespace knn_jni {
         // Create an index with ids and vectors. The configuration is defined by values in the Java map, parametersJ.
         // The index is serialized to indexPathJ.
         void CreateIndex(knn_jni::JNIUtilInterface * jniUtil, JNIEnv * env, jintArray idsJ, jlong vectorsAddress, jint dim,
-                         jstring indexPathJ, jobject parametersJ);
+                         jobject output, jobject parametersJ);
 
         // Load an index from indexPathJ into memory. Use parametersJ to set any query time parameters
         //
         // Return a pointer to the loaded index
         jlong LoadIndex(knn_jni::JNIUtilInterface * jniUtil, JNIEnv * env, jstring indexPathJ, jobject parametersJ);
+
+        // Load an index via an input stream into memory. Use parametersJ to set any query time parameters
+        //
+        // Return a pointer to the loaded index
+        jlong LoadIndexWithStream(knn_jni::JNIUtilInterface * jniUtil,
+                                  JNIEnv * env,
+                                  jobject readStream,
+                                  jobject parametersJ);
 
         // Execute a query against the index located in memory at indexPointerJ.
         //

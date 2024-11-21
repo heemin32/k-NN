@@ -11,15 +11,17 @@
 
 package org.opensearch.knn.index.memory;
 
+import lombok.Getter;
+import org.apache.lucene.store.Directory;
 import org.opensearch.cluster.service.ClusterService;
 import org.opensearch.common.Nullable;
-import org.opensearch.knn.index.util.IndexUtil;
+import org.opensearch.knn.index.codec.util.NativeMemoryCacheKeyHelper;
+import org.opensearch.knn.index.engine.qframe.QuantizationConfig;
 import org.opensearch.knn.index.VectorDataType;
 
 import java.io.IOException;
 import java.util.Map;
 import java.util.UUID;
-import java.util.function.Function;
 
 /**
  * Encapsulates all information needed to load a component into native memory.
@@ -62,46 +64,56 @@ public abstract class NativeMemoryEntryContext<T extends NativeMemoryAllocation>
 
     public static class IndexEntryContext extends NativeMemoryEntryContext<NativeMemoryAllocation.IndexAllocation> {
 
+        @Getter
+        private final Directory directory;
         private final NativeMemoryLoadStrategy.IndexLoadStrategy indexLoadStrategy;
+        @Getter
         private final String openSearchIndexName;
+        @Getter
         private final Map<String, Object> parameters;
         @Nullable
+        @Getter
         private final String modelId;
 
         /**
          * Constructor
          *
-         * @param indexPath path to index file. Also used as key in cache.
-         * @param indexLoadStrategy strategy to load index into memory
-         * @param parameters load time parameters
-         * @param openSearchIndexName opensearch index associated with index
+         * @param directory Lucene directory to create required IndexInput/IndexOutput to access files.
+         * @param vectorIndexCacheKey Cache key for {@link NativeMemoryCacheManager}. It must contain a vector file name.
+         * @param indexLoadStrategy Strategy to load index into memory
+         * @param parameters Load time parameters
+         * @param openSearchIndexName Opensearch index associated with index
          */
         public IndexEntryContext(
-            String indexPath,
+            Directory directory,
+            String vectorIndexCacheKey,
             NativeMemoryLoadStrategy.IndexLoadStrategy indexLoadStrategy,
             Map<String, Object> parameters,
             String openSearchIndexName
         ) {
-            this(indexPath, indexLoadStrategy, parameters, openSearchIndexName, null);
+            this(directory, vectorIndexCacheKey, indexLoadStrategy, parameters, openSearchIndexName, null);
         }
 
         /**
          * Constructor
          *
-         * @param indexPath path to index file. Also used as key in cache.
+         * @param directory Lucene directory to create required IndexInput/IndexOutput to access files.
+         * @param vectorIndexCacheKey Cache key for {@link NativeMemoryCacheManager}. It must contain a vector file name.
          * @param indexLoadStrategy strategy to load index into memory
          * @param parameters load time parameters
          * @param openSearchIndexName opensearch index associated with index
          * @param modelId model to be loaded. If none available, pass null
          */
         public IndexEntryContext(
-            String indexPath,
+            Directory directory,
+            String vectorIndexCacheKey,
             NativeMemoryLoadStrategy.IndexLoadStrategy indexLoadStrategy,
             Map<String, Object> parameters,
             String openSearchIndexName,
             String modelId
         ) {
-            super(indexPath);
+            super(vectorIndexCacheKey);
+            this.directory = directory;
             this.indexLoadStrategy = indexLoadStrategy;
             this.openSearchIndexName = openSearchIndexName;
             this.parameters = parameters;
@@ -110,51 +122,18 @@ public abstract class NativeMemoryEntryContext<T extends NativeMemoryAllocation>
 
         @Override
         public Integer calculateSizeInKB() {
-            return IndexSizeCalculator.INSTANCE.apply(this);
+            final String indexFileName = NativeMemoryCacheKeyHelper.extractVectorIndexFileName(key);
+            try {
+                final long fileLength = directory.fileLength(indexFileName);
+                return (int) (fileLength / 1024L);
+            } catch (IOException e) {
+                throw new RuntimeException(e);
+            }
         }
 
         @Override
         public NativeMemoryAllocation.IndexAllocation load() throws IOException {
             return indexLoadStrategy.load(this);
-        }
-
-        /**
-         * Getter for OpenSearch index name.
-         *
-         * @return OpenSearch index name
-         */
-        public String getOpenSearchIndexName() {
-            return openSearchIndexName;
-        }
-
-        /**
-         * Getter for parameters.
-         *
-         * @return parameters
-         */
-        public Map<String, Object> getParameters() {
-            return parameters;
-        }
-
-        /**
-         * Getter
-         *
-         * @return return model ID for the index. null if no model is in use
-         */
-        public String getModelId() {
-            return modelId;
-        }
-
-        private static class IndexSizeCalculator implements Function<IndexEntryContext, Integer> {
-
-            static IndexSizeCalculator INSTANCE = new IndexSizeCalculator();
-
-            IndexSizeCalculator() {}
-
-            @Override
-            public Integer apply(IndexEntryContext indexEntryContext) {
-                return IndexUtil.getFileSizeInKB(indexEntryContext.getKey());
-            }
         }
     }
 
@@ -171,6 +150,8 @@ public abstract class NativeMemoryEntryContext<T extends NativeMemoryAllocation>
         private final int maxVectorCount;
         private final int searchSize;
         private final VectorDataType vectorDataType;
+        @Getter
+        private final QuantizationConfig quantizationConfig;
 
         /**
          * Constructor
@@ -191,7 +172,8 @@ public abstract class NativeMemoryEntryContext<T extends NativeMemoryAllocation>
             ClusterService clusterService,
             int maxVectorCount,
             int searchSize,
-            VectorDataType vectorDataType
+            VectorDataType vectorDataType,
+            QuantizationConfig quantizationConfig
         ) {
             super(generateKey(trainIndexName, trainFieldName));
             this.size = size;
@@ -202,6 +184,7 @@ public abstract class NativeMemoryEntryContext<T extends NativeMemoryAllocation>
             this.maxVectorCount = maxVectorCount;
             this.searchSize = searchSize;
             this.vectorDataType = vectorDataType;
+            this.quantizationConfig = quantizationConfig;
         }
 
         @Override

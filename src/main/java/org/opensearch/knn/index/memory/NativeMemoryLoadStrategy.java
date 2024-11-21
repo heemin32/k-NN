@@ -12,21 +12,21 @@
 package org.opensearch.knn.index.memory;
 
 import lombok.extern.log4j.Log4j2;
+import org.apache.lucene.store.Directory;
+import org.apache.lucene.store.IOContext;
+import org.apache.lucene.store.IndexInput;
 import org.opensearch.core.action.ActionListener;
+import org.opensearch.knn.index.codec.util.NativeMemoryCacheKeyHelper;
+import org.opensearch.knn.index.engine.qframe.QuantizationConfig;
+import org.opensearch.knn.index.store.IndexInputWithBuffer;
 import org.opensearch.knn.index.util.IndexUtil;
 import org.opensearch.knn.jni.JNIService;
 import org.opensearch.knn.index.engine.KNNEngine;
 import org.opensearch.knn.training.TrainingDataConsumer;
 import org.opensearch.knn.training.VectorReader;
-import org.opensearch.watcher.FileChangesListener;
-import org.opensearch.watcher.FileWatcher;
-import org.opensearch.watcher.ResourceWatcherService;
-import org.opensearch.watcher.WatcherHandle;
 
 import java.io.Closeable;
 import java.io.IOException;
-import java.nio.file.Path;
-import java.nio.file.Paths;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
@@ -52,8 +52,6 @@ public interface NativeMemoryLoadStrategy<T extends NativeMemoryAllocation, U ex
         private static IndexLoadStrategy INSTANCE;
 
         private final ExecutorService executor;
-        private final FileChangesListener indexFileOnDeleteListener;
-        private ResourceWatcherService resourceWatcherService;
 
         /**
          * Get Singleton of this load strategy.
@@ -67,35 +65,44 @@ public interface NativeMemoryLoadStrategy<T extends NativeMemoryAllocation, U ex
             return INSTANCE;
         }
 
-        /**
-         * Initialize singleton.
-         *
-         * @param resourceWatcherService service used to monitor index files for deletion
-         */
-        public static void initialize(final ResourceWatcherService resourceWatcherService) {
-            getInstance().resourceWatcherService = resourceWatcherService;
-        }
-
         private IndexLoadStrategy() {
             executor = Executors.newSingleThreadExecutor();
-            indexFileOnDeleteListener = new FileChangesListener() {
-                @Override
-                public void onFileDeleted(Path indexFilePath) {
-                    NativeMemoryCacheManager.getInstance().invalidate(indexFilePath.toString());
-                }
-            };
         }
 
         @Override
         public NativeMemoryAllocation.IndexAllocation load(NativeMemoryEntryContext.IndexEntryContext indexEntryContext)
             throws IOException {
-            Path indexPath = Paths.get(indexEntryContext.getKey());
-            FileWatcher fileWatcher = new FileWatcher(indexPath);
-            fileWatcher.addListener(indexFileOnDeleteListener);
-            fileWatcher.init();
+            // Extract vector file name from the given cache key.
+            // Ex: _0_165_my_field.faiss@1vaqiupVUwvkXAG4Qc/RPg==
+            final String cacheKey = indexEntryContext.getKey();
+            final String vectorFileName = NativeMemoryCacheKeyHelper.extractVectorIndexFileName(cacheKey);
+            if (vectorFileName == null) {
+                throw new IllegalStateException(
+                    "Invalid cache key was given. The key [" + cacheKey + "] does not contain the corresponding vector file name."
+                );
+            }
 
-            KNNEngine knnEngine = KNNEngine.getEngineNameFromPath(indexPath.toString());
-            long indexAddress = JNIService.loadIndex(indexPath.toString(), indexEntryContext.getParameters(), knnEngine);
+            // Prepare for opening index input from directory.
+            final KNNEngine knnEngine = KNNEngine.getEngineNameFromPath(vectorFileName);
+            final Directory directory = indexEntryContext.getDirectory();
+            final int indexSizeKb = Math.toIntExact(directory.fileLength(vectorFileName) / 1024);
+
+            // Try to open an index input then pass it down to native engine for loading an index.
+            try (IndexInput readStream = directory.openInput(vectorFileName, IOContext.READONCE)) {
+                final IndexInputWithBuffer indexInputWithBuffer = new IndexInputWithBuffer(readStream);
+                final long indexAddress = JNIService.loadIndex(indexInputWithBuffer, indexEntryContext.getParameters(), knnEngine);
+
+                return createIndexAllocation(indexEntryContext, knnEngine, indexAddress, indexSizeKb, vectorFileName);
+            }
+        }
+
+        private NativeMemoryAllocation.IndexAllocation createIndexAllocation(
+            final NativeMemoryEntryContext.IndexEntryContext indexEntryContext,
+            final KNNEngine knnEngine,
+            final long indexAddress,
+            final int indexSizeKb,
+            final String vectorFileName
+        ) {
             SharedIndexState sharedIndexState = null;
             String modelId = indexEntryContext.getModelId();
             if (IndexUtil.isSharedIndexStateRequired(knnEngine, modelId, indexAddress)) {
@@ -104,15 +111,13 @@ public interface NativeMemoryLoadStrategy<T extends NativeMemoryAllocation, U ex
                 JNIService.setSharedIndexState(indexAddress, sharedIndexState.getSharedIndexStateAddress(), knnEngine);
             }
 
-            final WatcherHandle<FileWatcher> watcherHandle = resourceWatcherService.add(fileWatcher);
             return new NativeMemoryAllocation.IndexAllocation(
                 executor,
                 indexAddress,
-                indexEntryContext.calculateSizeInKB(),
+                indexSizeKb,
                 knnEngine,
-                indexPath.toString(),
+                vectorFileName,
                 indexEntryContext.getOpenSearchIndexName(),
-                watcherHandle,
                 sharedIndexState,
                 IndexUtil.isBinaryIndex(knnEngine, indexEntryContext.getParameters())
             );
@@ -129,7 +134,7 @@ public interface NativeMemoryLoadStrategy<T extends NativeMemoryAllocation, U ex
             NativeMemoryLoadStrategy<NativeMemoryAllocation.TrainingDataAllocation, NativeMemoryEntryContext.TrainingDataEntryContext>,
             Closeable {
 
-        private static TrainingLoadStrategy INSTANCE;
+        private static volatile TrainingLoadStrategy INSTANCE;
 
         private final ExecutorService executor;
         private VectorReader vectorReader;
@@ -170,6 +175,9 @@ public interface NativeMemoryLoadStrategy<T extends NativeMemoryAllocation, U ex
                 nativeMemoryEntryContext.calculateSizeInKB(),
                 nativeMemoryEntryContext.getVectorDataType()
             );
+
+            QuantizationConfig quantizationConfig = nativeMemoryEntryContext.getQuantizationConfig();
+            trainingDataAllocation.setQuantizationConfig(quantizationConfig);
 
             TrainingDataConsumer vectorDataConsumer = nativeMemoryEntryContext.getVectorDataType()
                 .getTrainingDataConsumer(trainingDataAllocation);

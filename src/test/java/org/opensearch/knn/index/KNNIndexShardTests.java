@@ -8,15 +8,24 @@ package org.opensearch.knn.index;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableSet;
 import lombok.SneakyThrows;
+import org.apache.lucene.index.SegmentCommitInfo;
+import org.apache.lucene.index.SegmentInfo;
+import org.apache.lucene.store.Directory;
+import org.apache.lucene.util.StringHelper;
+import org.apache.lucene.util.Version;
+import org.mockito.Mockito;
+import org.opensearch.common.settings.Settings;
 import org.opensearch.knn.KNNSingleNodeTestCase;
 import org.opensearch.index.IndexService;
 import org.opensearch.index.engine.Engine;
 import org.opensearch.index.shard.IndexShard;
+import org.opensearch.knn.index.engine.KNNEngine;
 import org.opensearch.knn.index.memory.NativeMemoryCacheManager;
 
 import java.io.IOException;
-import java.nio.file.Path;
-import java.nio.file.Paths;
+import java.lang.reflect.Field;
+import java.util.Collections;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 import java.util.concurrent.ExecutionException;
@@ -64,6 +73,7 @@ public class KNNIndexShardTests extends KNNSingleNodeTestCase {
     public void testWarmup_shardPresentInCache() throws InterruptedException, ExecutionException, IOException {
         IndexService indexService = createKNNIndex(testIndexName);
         createKnnIndexMapping(testIndexName, testFieldName, dimensions);
+        updateIndexSetting(testIndexName, Settings.builder().put(KNNSettings.INDEX_KNN_ADVANCED_APPROXIMATE_THRESHOLD, 0).build());
         addKnnDoc(testIndexName, "1", testFieldName, new Float[] { 2.5F, 3.5F });
 
         searchKNNIndex(testIndexName, testFieldName, new float[] { 1.0f, 2.0f }, 1);
@@ -78,6 +88,7 @@ public class KNNIndexShardTests extends KNNSingleNodeTestCase {
     public void testWarmup_shardNotPresentInCache() throws InterruptedException, ExecutionException, IOException {
         IndexService indexService = createKNNIndex(testIndexName);
         createKnnIndexMapping(testIndexName, testFieldName, dimensions);
+        updateIndexSetting(testIndexName, Settings.builder().put(KNNSettings.INDEX_KNN_ADVANCED_APPROXIMATE_THRESHOLD, 0).build());
         IndexShard indexShard;
         KNNIndexShard knnIndexShard;
 
@@ -98,7 +109,8 @@ public class KNNIndexShardTests extends KNNSingleNodeTestCase {
 
     public void testGetAllEngineFileContexts() throws IOException, ExecutionException, InterruptedException {
         IndexService indexService = createKNNIndex(testIndexName);
-        createKnnIndexMapping(testIndexName, testFieldName, dimensions);
+        createKnnIndexMapping(testIndexName, testFieldName, dimensions, KNNEngine.NMSLIB);
+        updateIndexSetting(testIndexName, Settings.builder().put(KNNSettings.INDEX_KNN_ADVANCED_APPROXIMATE_THRESHOLD, 0).build());
 
         IndexShard indexShard = indexService.iterator().next();
         KNNIndexShard knnIndexShard = new KNNIndexShard(indexShard);
@@ -113,11 +125,14 @@ public class KNNIndexShardTests extends KNNSingleNodeTestCase {
         searcher = indexShard.acquireSearcher("test-hnsw-paths-2");
         engineFileContexts = knnIndexShard.getAllEngineFileContexts(searcher.getIndexReader());
         assertEquals(1, engineFileContexts.size());
-        List<String> paths = engineFileContexts.stream().map(KNNIndexShard.EngineFileContext::getIndexPath).collect(Collectors.toList());
+        List<String> paths = engineFileContexts.stream()
+            .map(KNNIndexShard.EngineFileContext::getVectorFileName)
+            .collect(Collectors.toList());
         assertTrue(paths.get(0).contains("hnsw") || paths.get(0).contains("hnswc"));
         searcher.close();
     }
 
+    @SneakyThrows
     public void testGetEngineFileContexts() {
         // Check that the correct engine paths are being returned by the KNNIndexShard
         String segmentName = "_0";
@@ -143,20 +158,40 @@ public class KNNIndexShardTests extends KNNSingleNodeTestCase {
 
         KNNIndexShard knnIndexShard = new KNNIndexShard(null);
 
-        Path path = Paths.get("");
-        List<KNNIndexShard.EngineFileContext> included = knnIndexShard.getEngineFileContexts(
-            files,
+        final Directory dummyDirectory = Mockito.mock(Directory.class);
+        final SegmentInfo segmentInfo = new SegmentInfo(
+            dummyDirectory,
+            Version.LATEST,
+            null,
             segmentName,
+            0,
+            false,
+            false,
+            null,
+            Collections.emptyMap(),
+            new byte[StringHelper.ID_LENGTH],
+            Collections.emptyMap(),
+            null
+        );
+        // Inject 'files' into the segment info instance.
+        // Since SegmentInfo class does trim out its given file list, for example removing segment name from a file name etc,
+        // we can't just use 'setFiles' api to assign the file list. Which will lead this unit test to be fail.
+        final Field setFilesPrivateField = SegmentInfo.class.getDeclaredField("setFiles");
+        setFilesPrivateField.setAccessible(true);
+        setFilesPrivateField.set(segmentInfo, new HashSet<>(files));
+
+        final SegmentCommitInfo segmentCommitInfo = new SegmentCommitInfo(segmentInfo, 0, 0, -1, 0, 0, null);
+        List<KNNIndexShard.EngineFileContext> included = knnIndexShard.getEngineFileContexts(
+            segmentCommitInfo,
             fieldName,
             fileExt,
-            path,
             spaceType,
             modelId,
             vectorDataType
         );
 
         assertEquals(includedFileNames.size(), included.size());
-        included.stream().map(KNNIndexShard.EngineFileContext::getIndexPath).forEach(o -> assertTrue(includedFileNames.contains(o)));
+        included.stream().map(KNNIndexShard.EngineFileContext::getVectorFileName).forEach(o -> assertTrue(includedFileNames.contains(o)));
     }
 
     @SneakyThrows
@@ -174,6 +209,7 @@ public class KNNIndexShardTests extends KNNSingleNodeTestCase {
     public void testClearCache_shardPresentInCache() {
         IndexService indexService = createKNNIndex(testIndexName);
         createKnnIndexMapping(testIndexName, testFieldName, dimensions);
+        updateIndexSetting(testIndexName, Settings.builder().put(KNNSettings.INDEX_KNN_ADVANCED_APPROXIMATE_THRESHOLD, 0).build());
         addKnnDoc(testIndexName, String.valueOf(randomInt()), testFieldName, new Float[] { randomFloat(), randomFloat() });
 
         IndexShard indexShard = indexService.iterator().next();

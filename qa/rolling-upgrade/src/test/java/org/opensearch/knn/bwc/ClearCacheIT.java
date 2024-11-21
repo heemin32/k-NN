@@ -5,6 +5,8 @@
 
 package org.opensearch.knn.bwc;
 
+import org.opensearch.common.settings.Settings;
+
 import java.util.Collections;
 
 import static org.opensearch.knn.TestUtils.NODES_BWC_CLUSTER;
@@ -22,9 +24,15 @@ public class ClearCacheIT extends AbstractRollingUpgradeTestCase {
         waitForClusterHealthGreen(NODES_BWC_CLUSTER);
         switch (getClusterType()) {
             case OLD:
-                createKnnIndex(testIndex, getKNNDefaultIndexSettings(), createKnnIndexMapping(TEST_FIELD, DIMENSIONS));
+                Settings indexSettings = isApproximateThresholdSupported(getBWCVersion())
+                    ? buildKNNIndexSettings(0)
+                    : getKNNDefaultIndexSettings();
+                createKnnIndex(testIndex, indexSettings, createKnnIndexMapping(TEST_FIELD, DIMENSIONS));
                 int docIdOld = 0;
                 addKNNDocs(testIndex, TEST_FIELD, DIMENSIONS, docIdOld, NUM_DOCS);
+                int graphCount = getTotalGraphsInCache();
+                knnWarmup(Collections.singletonList(testIndex));
+                assertTrue(getTotalGraphsInCache() > graphCount);
                 break;
             case UPGRADED:
                 queryCnt = NUM_DOCS;
@@ -42,14 +50,8 @@ public class ClearCacheIT extends AbstractRollingUpgradeTestCase {
 
     // validation steps for Clear Cache API after upgrading all nodes from old version to new version
     public void validateClearCacheOnUpgrade(int queryCount) throws Exception {
-        int graphCount = getTotalGraphsInCache();
-        knnWarmup(Collections.singletonList(testIndex));
-        assertTrue(getTotalGraphsInCache() > graphCount);
-        validateKNNSearch(testIndex, TEST_FIELD, DIMENSIONS, queryCount, K);
-
         clearCache(Collections.singletonList(testIndex));
         assertEquals(0, getTotalGraphsInCache());
-        validateKNNSearch(testIndex, TEST_FIELD, DIMENSIONS, queryCount, K);
     }
 
 }

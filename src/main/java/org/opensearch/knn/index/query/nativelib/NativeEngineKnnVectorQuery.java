@@ -20,6 +20,8 @@ import org.apache.lucene.search.Weight;
 import org.apache.lucene.util.BitSet;
 import org.apache.lucene.util.Bits;
 import org.opensearch.common.StopWatch;
+import org.opensearch.knn.index.KNNSettings;
+import org.opensearch.knn.index.query.ExactSearcher;
 import org.opensearch.knn.index.query.KNNQuery;
 import org.opensearch.knn.index.query.KNNWeight;
 import org.opensearch.knn.index.query.ResultUtil;
@@ -28,6 +30,7 @@ import org.opensearch.knn.index.query.rescore.RescoreContext;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
@@ -51,18 +54,21 @@ public class NativeEngineKnnVectorQuery extends Query {
     @Override
     public Weight createWeight(IndexSearcher indexSearcher, ScoreMode scoreMode, float boost) throws IOException {
         final IndexReader reader = indexSearcher.getIndexReader();
-        final KNNWeight knnWeight = (KNNWeight) knnQuery.createWeight(indexSearcher, ScoreMode.COMPLETE, 1);
+        final KNNWeight knnWeight = (KNNWeight) knnQuery.createWeight(indexSearcher, scoreMode, 1);
         List<LeafReaderContext> leafReaderContexts = reader.leaves();
-
         List<Map<Integer, Float>> perLeafResults;
         RescoreContext rescoreContext = knnQuery.getRescoreContext();
-        int finalK = knnQuery.getK();
+        final int finalK = knnQuery.getK();
         if (rescoreContext == null) {
             perLeafResults = doSearch(indexSearcher, leafReaderContexts, knnWeight, finalK);
         } else {
-            int firstPassK = rescoreContext.getFirstPassK(finalK);
+            boolean isShardLevelRescoringEnabled = KNNSettings.isShardLevelRescoringEnabledForDiskBasedVector(knnQuery.getIndexName());
+            int dimension = knnQuery.getQueryVector().length;
+            int firstPassK = rescoreContext.getFirstPassK(finalK, isShardLevelRescoringEnabled, dimension);
             perLeafResults = doSearch(indexSearcher, leafReaderContexts, knnWeight, firstPassK);
-            ResultUtil.reduceToTopK(perLeafResults, firstPassK);
+            if (isShardLevelRescoringEnabled == true) {
+                ResultUtil.reduceToTopK(perLeafResults, firstPassK);
+            }
 
             StopWatch stopWatch = new StopWatch().start();
             perLeafResults = doRescore(indexSearcher, leafReaderContexts, knnWeight, perLeafResults, finalK);
@@ -107,8 +113,21 @@ public class NativeEngineKnnVectorQuery extends Query {
             LeafReaderContext leafReaderContext = leafReaderContexts.get(i);
             int finalI = i;
             rescoreTasks.add(() -> {
-                BitSet convertedBitSet = ResultUtil.resultMapToMatchBitSet(perLeafResults.get(finalI));
-                return knnWeight.exactSearch(leafReaderContext, convertedBitSet, false, k);
+                final BitSet convertedBitSet = ResultUtil.resultMapToMatchBitSet(perLeafResults.get(finalI));
+                // if there is no docIds to re-score from a segment we should return early to ensure that we are not
+                // wasting any computation
+                if (convertedBitSet == null) {
+                    return Collections.emptyMap();
+                }
+                final ExactSearcher.ExactSearcherContext exactSearcherContext = ExactSearcher.ExactSearcherContext.builder()
+                    .matchedDocs(convertedBitSet)
+                    // setting to false because in re-scoring we want to do exact search on full precision vectors
+                    .useQuantizedVectorsForSearch(false)
+                    .k(k)
+                    .isParentHits(false)
+                    .knnQuery(knnQuery)
+                    .build();
+                return knnWeight.exactSearch(leafReaderContext, exactSearcherContext);
             });
         }
         return indexSearcher.getTaskExecutor().invokeAll(rescoreTasks);

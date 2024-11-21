@@ -12,14 +12,15 @@
 package org.opensearch.knn.index.memory;
 
 import lombok.Getter;
+import lombok.Setter;
 import org.apache.lucene.index.LeafReaderContext;
 import org.opensearch.knn.common.featureflags.KNNFeatureFlags;
+import org.opensearch.common.concurrent.RefCountedReleasable;
 import org.opensearch.knn.index.VectorDataType;
+import org.opensearch.knn.index.engine.qframe.QuantizationConfig;
 import org.opensearch.knn.index.query.KNNWeight;
 import org.opensearch.knn.jni.JNIService;
 import org.opensearch.knn.index.engine.KNNEngine;
-import org.opensearch.watcher.FileWatcher;
-import org.opensearch.watcher.WatcherHandle;
 
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Semaphore;
@@ -80,6 +81,26 @@ public interface NativeMemoryAllocation {
     int getSizeInKB();
 
     /**
+     * Increments the refCount of this instance.
+     *
+     * @see #decRef
+     * @throws IllegalStateException iff the reference counter can not be incremented.
+     */
+    default void incRef() {}
+
+    /**
+     * Decreases the refCount of this  instance. If the refCount drops to 0, then this
+     * instance is considered as closed and should not be used anymore.
+     *
+     * @see #incRef
+     *
+     * @return returns {@code true} if the ref count dropped to 0 as a result of calling this method
+     */
+    default boolean decRef() {
+        return true;
+    }
+
+    /**
      * Represents native indices loaded into memory. Because these indices are backed by files, they should be
      * freed when file is deleted.
      */
@@ -87,41 +108,39 @@ public interface NativeMemoryAllocation {
 
         private final ExecutorService executor;
         private final long memoryAddress;
-        private final int size;
+        private final int sizeKb;
         private volatile boolean closed;
         @Getter
         private final KNNEngine knnEngine;
         @Getter
-        private final String indexPath;
+        private final String vectorFileName;
         @Getter
         private final String openSearchIndexName;
         private final ReadWriteLock readWriteLock;
-        private final WatcherHandle<FileWatcher> watcherHandle;
         private final SharedIndexState sharedIndexState;
         @Getter
         private final boolean isBinaryIndex;
+        private final RefCountedReleasable<IndexAllocation> refCounted;
 
         /**
          * Constructor
          *
          * @param executorService Executor service used to close the allocation
          * @param memoryAddress Pointer in memory to the index
-         * @param size Size this index consumes in kilobytes
+         * @param sizeKb Size this index consumes in kilobytes
          * @param knnEngine KNNEngine associated with the index allocation
-         * @param indexPath File path to index
+         * @param vectorFileName Vector file name. Ex: _0_165_my_field.faiss
          * @param openSearchIndexName Name of OpenSearch index this index is associated with
-         * @param watcherHandle Handle for watching index file
          */
         IndexAllocation(
             ExecutorService executorService,
             long memoryAddress,
-            int size,
+            int sizeKb,
             KNNEngine knnEngine,
-            String indexPath,
-            String openSearchIndexName,
-            WatcherHandle<FileWatcher> watcherHandle
+            String vectorFileName,
+            String openSearchIndexName
         ) {
-            this(executorService, memoryAddress, size, knnEngine, indexPath, openSearchIndexName, watcherHandle, null, false);
+            this(executorService, memoryAddress, sizeKb, knnEngine, vectorFileName, openSearchIndexName, null, false);
         }
 
         /**
@@ -129,43 +148,43 @@ public interface NativeMemoryAllocation {
          *
          * @param executorService Executor service used to close the allocation
          * @param memoryAddress Pointer in memory to the index
-         * @param size Size this index consumes in kilobytes
+         * @param sizeKb Size this index consumes in kilobytes
          * @param knnEngine KNNEngine associated with the index allocation
-         * @param indexPath File path to index
+         * @param vectorFileName Vector file name. Ex: _0_165_my_field.faiss
          * @param openSearchIndexName Name of OpenSearch index this index is associated with
-         * @param watcherHandle Handle for watching index file
          * @param sharedIndexState Shared index state. If not shared state present, pass null.
          */
         IndexAllocation(
             ExecutorService executorService,
             long memoryAddress,
-            int size,
+            int sizeKb,
             KNNEngine knnEngine,
-            String indexPath,
+            String vectorFileName,
             String openSearchIndexName,
-            WatcherHandle<FileWatcher> watcherHandle,
             SharedIndexState sharedIndexState,
             boolean isBinaryIndex
         ) {
             this.executor = executorService;
             this.closed = false;
             this.knnEngine = knnEngine;
-            this.indexPath = indexPath;
+            this.vectorFileName = vectorFileName;
             this.openSearchIndexName = openSearchIndexName;
             this.memoryAddress = memoryAddress;
             this.readWriteLock = new ReentrantReadWriteLock();
-            this.size = size;
-            this.watcherHandle = watcherHandle;
+            this.sizeKb = sizeKb;
             this.sharedIndexState = sharedIndexState;
             this.isBinaryIndex = isBinaryIndex;
+            this.refCounted = new RefCountedReleasable<>("IndexAllocation-Reference", this, this::closeInternal);
         }
 
-        @Override
-        public void close() {
+        protected void closeInternal() {
             Runnable onClose = () -> {
                 writeLock();
-                cleanup();
-                writeUnlock();
+                try {
+                    cleanup();
+                } finally {
+                    writeUnlock();
+                }
             };
 
             // The close operation needs to be blocking to prevent overflow
@@ -177,14 +196,19 @@ public interface NativeMemoryAllocation {
             }
         }
 
+        @Override
+        public void close() {
+            if (!closed && refCounted.refCount() > 0) {
+                refCounted.close();
+            }
+        }
+
         private void cleanup() {
             if (this.closed) {
                 return;
             }
 
             this.closed = true;
-
-            watcherHandle.stop();
 
             // memoryAddress is sometimes initialized to 0. If this is ever the case, freeing will surely fail.
             if (memoryAddress != 0) {
@@ -238,7 +262,17 @@ public interface NativeMemoryAllocation {
 
         @Override
         public int getSizeInKB() {
-            return size;
+            return sizeKb;
+        }
+
+        @Override
+        public void incRef() {
+            refCounted.incRef();
+        }
+
+        @Override
+        public boolean decRef() {
+            return refCounted.decRef();
         }
     }
 
@@ -250,27 +284,31 @@ public interface NativeMemoryAllocation {
         private final ExecutorService executor;
 
         private volatile boolean closed;
+        @Setter
         private long memoryAddress;
-        private final int size;
+        private final int sizeKb;
+        @Getter
+        @Setter
+        private QuantizationConfig quantizationConfig = QuantizationConfig.EMPTY;
 
         // Implement reader/writer with semaphores to deal with passing lock conditions between threads
         private int readCount;
-        private Semaphore readSemaphore;
-        private Semaphore writeSemaphore;
-        private VectorDataType vectorDataType;
+        private final Semaphore readSemaphore;
+        private final Semaphore writeSemaphore;
+        private final VectorDataType vectorDataType;
 
         /**
          * Constructor
          *
          * @param executor Executor used for allocation close
          * @param memoryAddress pointer in memory to the training data allocation
-         * @param size amount memory needed for allocation in kilobytes
+         * @param sizeKb amount memory needed for allocation in kilobytes
          */
-        public TrainingDataAllocation(ExecutorService executor, long memoryAddress, int size, VectorDataType vectorDataType) {
+        public TrainingDataAllocation(ExecutorService executor, long memoryAddress, int sizeKb, VectorDataType vectorDataType) {
             this.executor = executor;
             this.closed = false;
             this.memoryAddress = memoryAddress;
-            this.size = size;
+            this.sizeKb = sizeKb;
 
             this.readCount = 0;
             this.readSemaphore = new Semaphore(1);
@@ -282,8 +320,11 @@ public interface NativeMemoryAllocation {
         public void close() {
             executor.execute(() -> {
                 writeLock();
-                cleanup();
-                writeUnlock();
+                try {
+                    cleanup();
+                } finally {
+                    writeUnlock();
+                }
             });
         }
 
@@ -351,7 +392,7 @@ public interface NativeMemoryAllocation {
         /**
          * A write lock will be obtained either on eviction from {@link NativeMemoryCacheManager NativeMemoryManager's}
          * or when training data is actually being loaded. A semaphore is used because collecting training data
-         * happens asynchrously, so the thread that obtains the lock will not be the same thread that releases the
+         * happens asynchronously, so the thread that obtains the lock will not be the same thread that releases the
          * lock.
          */
         @Override
@@ -388,23 +429,14 @@ public interface NativeMemoryAllocation {
 
         @Override
         public int getSizeInKB() {
-            return size;
-        }
-
-        /**
-         * Setter for memory address to training data
-         *
-         * @param memoryAddress Pointer to training data
-         */
-        public void setMemoryAddress(long memoryAddress) {
-            this.memoryAddress = memoryAddress;
+            return sizeKb;
         }
     }
 
     /**
      * An anonymous allocation is used to reserve space in the native memory cache. It does not have a
      * memory address. This allocation type should be used when a function allocates a large portion of memory in the
-     * function, runs for awhile, and then frees it.
+     * function, runs for a while, and then frees it.
      */
     class AnonymousAllocation implements NativeMemoryAllocation {
 

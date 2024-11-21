@@ -10,7 +10,9 @@ import lombok.Getter;
 import org.opensearch.core.common.Strings;
 import org.opensearch.knn.index.query.rescore.RescoreContext;
 
+import java.util.Collections;
 import java.util.Locale;
+import java.util.Set;
 
 /**
  * Enum representing the compression level for float vectors. Compression in this sense refers to compressing a
@@ -19,23 +21,16 @@ import java.util.Locale;
  */
 @AllArgsConstructor
 public enum CompressionLevel {
-    NOT_CONFIGURED(-1, "", null),
-    x1(1, "1x", null),
-    x2(2, "2x", null),
-    x4(4, "4x", new RescoreContext(1.0f)),
-    x8(8, "8x", new RescoreContext(1.5f)),
-    x16(16, "16x", new RescoreContext(2.0f)),
-    x32(32, "32x", new RescoreContext(2.0f));
+    NOT_CONFIGURED(-1, "", null, Collections.emptySet()),
+    x1(1, "1x", null, Collections.emptySet()),
+    x2(2, "2x", null, Collections.emptySet()),
+    x4(4, "4x", null, Collections.emptySet()),
+    x8(8, "8x", new RescoreContext(2.0f, false), Set.of(Mode.ON_DISK)),
+    x16(16, "16x", new RescoreContext(3.0f, false), Set.of(Mode.ON_DISK)),
+    x32(32, "32x", new RescoreContext(3.0f, false), Set.of(Mode.ON_DISK)),
+    x64(64, "64x", new RescoreContext(5.0f, false), Set.of(Mode.ON_DISK));
 
-    // Internally, an empty string is easier to deal with them null. However, from the mapping,
-    // we do not want users to pass in the empty string and instead want null. So we make the conversion herex
-    public static final String[] NAMES_ARRAY = new String[] {
-        NOT_CONFIGURED.getName(),
-        x1.getName(),
-        x2.getName(),
-        x8.getName(),
-        x16.getName(),
-        x32.getName() };
+    public static final CompressionLevel MAX_COMPRESSION_LEVEL = CompressionLevel.x64;
 
     /**
      * Default is set to 1x and is a noop
@@ -64,8 +59,8 @@ public enum CompressionLevel {
     private final int compressionLevel;
     @Getter
     private final String name;
-    @Getter
     private final RescoreContext defaultRescoreContext;
+    private final Set<Mode> modesForRescore;
 
     /**
      * Gets the number of bits used to represent a float in order to achieve this compression. For instance, for
@@ -90,4 +85,40 @@ public enum CompressionLevel {
     public static boolean isConfigured(CompressionLevel compressionLevel) {
         return compressionLevel != null && compressionLevel != NOT_CONFIGURED;
     }
+
+    /**
+     * Returns the appropriate {@link RescoreContext} based on the given {@code mode} and {@code dimension}.
+     *
+     * <p>If the {@code mode} is present in the valid {@code modesForRescore} set, the method checks the value of
+     * {@code dimension}:
+     * <ul>
+     *     <li>If {@code dimension} is less than or equal to 1000, it returns a {@link RescoreContext} with an
+     *         oversample factor of 5.0f.</li>
+     *     <li>If {@code dimension} is greater than 1000, it returns the default {@link RescoreContext} associated with
+     *         the {@link CompressionLevel}. If no default is set, it falls back to {@link RescoreContext#getDefault()}.</li>
+     * </ul>
+     * If the {@code mode} is not valid, the method returns {@code null}.
+     *
+     * @param mode      The {@link Mode} for which to retrieve the {@link RescoreContext}.
+     * @param dimension The dimensional value that determines the {@link RescoreContext} behavior.
+     * @return          A {@link RescoreContext} with an oversample factor of 5.0f if {@code dimension} is less than
+     *                  or equal to 1000, the default {@link RescoreContext} if greater, or {@code null} if the mode
+     *                  is invalid.
+     */
+    public RescoreContext getDefaultRescoreContext(Mode mode, int dimension) {
+        if (modesForRescore.contains(mode)) {
+            // Adjust RescoreContext based on dimension
+            if (dimension <= RescoreContext.DIMENSION_THRESHOLD) {
+                // For dimensions <= 1000, return a RescoreContext with 5.0f oversample factor
+                return RescoreContext.builder()
+                    .oversampleFactor(RescoreContext.OVERSAMPLE_FACTOR_BELOW_DIMENSION_THRESHOLD)
+                    .userProvided(false)
+                    .build();
+            } else {
+                return defaultRescoreContext;
+            }
+        }
+        return null;
+    }
+
 }

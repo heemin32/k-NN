@@ -13,6 +13,9 @@ package org.opensearch.knn.index.memory;
 
 import com.google.common.collect.ImmutableMap;
 import lombok.SneakyThrows;
+import org.apache.lucene.store.Directory;
+import org.apache.lucene.store.IOContext;
+import org.apache.lucene.store.IndexInput;
 import org.junit.Before;
 import org.mockito.Mock;
 import org.opensearch.common.settings.ClusterSettings;
@@ -23,11 +26,9 @@ import org.opensearch.knn.index.KNNSettings;
 import org.opensearch.knn.index.SpaceType;
 import org.opensearch.knn.index.VectorDataType;
 import org.opensearch.knn.index.engine.KNNEngine;
-import org.opensearch.knn.index.util.IndexUtil;
+import org.opensearch.knn.index.store.IndexInputWithBuffer;
 import org.opensearch.knn.jni.JNICommons;
 import org.opensearch.knn.jni.JNIService;
-import org.opensearch.watcher.FileWatcher;
-import org.opensearch.watcher.WatcherHandle;
 
 import java.nio.file.Path;
 import java.util.Arrays;
@@ -37,9 +38,9 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicReference;
 
-import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 import static org.opensearch.knn.common.featureflags.KNNFeatureFlags.KNN_FORCE_EVICT_CACHE_ENABLED_SETTING;
@@ -64,120 +65,121 @@ public class NativeMemoryAllocationTests extends KNNTestCase {
         KNNSettings.state().setClusterService(clusterService);
     }
 
-    public void testIndexAllocation_close() throws InterruptedException {
+    @SneakyThrows
+    public void testIndexAllocation_close() {
         // Create basic nmslib HNSW index
-        Path dir = createTempDir();
-        KNNEngine knnEngine = KNNEngine.NMSLIB;
-        String indexName = "test1" + knnEngine.getExtension();
-        String path = dir.resolve(indexName).toAbsolutePath().toString();
-        int numVectors = 10;
-        int dimension = 10;
-        int[] ids = new int[numVectors];
-        float[][] vectors = new float[numVectors][dimension];
-        for (int i = 0; i < numVectors; i++) {
-            ids[i] = i;
-            Arrays.fill(vectors[i], 1f);
+        Path tempDirPath = createTempDir();
+        try (Directory directory = newFSDirectory(tempDirPath)) {
+            KNNEngine knnEngine = KNNEngine.NMSLIB;
+            String indexFileName = "test1" + knnEngine.getExtension();
+            int numVectors = 10;
+            int dimension = 10;
+            int[] ids = new int[numVectors];
+            float[][] vectors = new float[numVectors][dimension];
+            for (int i = 0; i < numVectors; i++) {
+                ids[i] = i;
+                Arrays.fill(vectors[i], 1f);
+            }
+            Map<String, Object> parameters = ImmutableMap.of(KNNConstants.SPACE_TYPE, SpaceType.DEFAULT.getValue());
+            long vectorMemoryAddress = JNICommons.storeVectorData(0, vectors, numVectors * dimension);
+            TestUtils.createIndex(ids, vectorMemoryAddress, dimension, directory, indexFileName, parameters, knnEngine);
+
+            // Load index into memory
+            final long memoryAddress;
+            try (IndexInput indexInput = directory.openInput(indexFileName, IOContext.DEFAULT)) {
+                final IndexInputWithBuffer indexInputWithBuffer = new IndexInputWithBuffer(indexInput);
+                memoryAddress = JNIService.loadIndex(indexInputWithBuffer, parameters, knnEngine);
+            }
+
+            ExecutorService executorService = Executors.newSingleThreadExecutor();
+            NativeMemoryAllocation.IndexAllocation indexAllocation = new NativeMemoryAllocation.IndexAllocation(
+                executorService,
+                memoryAddress,
+                (int) directory.fileLength(indexFileName) / 1024,
+                knnEngine,
+                indexFileName,
+                "test"
+            );
+
+            indexAllocation.close();
+
+            Thread.sleep(1000 * 2);
+            indexAllocation.writeLock();
+            assertTrue(indexAllocation.isClosed());
+            indexAllocation.writeUnlock();
+
+            indexAllocation.close();
+
+            Thread.sleep(1000 * 2);
+            indexAllocation.writeLock();
+            assertTrue(indexAllocation.isClosed());
+            indexAllocation.writeUnlock();
+
+            executorService.shutdown();
         }
-        Map<String, Object> parameters = ImmutableMap.of(KNNConstants.SPACE_TYPE, SpaceType.DEFAULT.getValue());
-        long vectorMemoryAddress = JNICommons.storeVectorData(0, vectors, numVectors * dimension);
-        TestUtils.createIndex(ids, vectorMemoryAddress, dimension, path, parameters, knnEngine);
-
-        // Load index into memory
-        long memoryAddress = JNIService.loadIndex(path, parameters, knnEngine);
-
-        @SuppressWarnings("unchecked")
-        WatcherHandle<FileWatcher> watcherHandle = (WatcherHandle<FileWatcher>) mock(WatcherHandle.class);
-        doNothing().when(watcherHandle).stop();
-
-        ExecutorService executorService = Executors.newSingleThreadExecutor();
-        NativeMemoryAllocation.IndexAllocation indexAllocation = new NativeMemoryAllocation.IndexAllocation(
-            executorService,
-            memoryAddress,
-            IndexUtil.getFileSizeInKB(path),
-            knnEngine,
-            path,
-            "test",
-            watcherHandle
-        );
-
-        indexAllocation.close();
-
-        Thread.sleep(1000 * 2);
-        indexAllocation.writeLock();
-        assertTrue(indexAllocation.isClosed());
-        indexAllocation.writeUnlock();
-
-        indexAllocation.close();
-
-        Thread.sleep(1000 * 2);
-        indexAllocation.writeLock();
-        assertTrue(indexAllocation.isClosed());
-        indexAllocation.writeUnlock();
-
-        executorService.shutdown();
     }
 
     @SneakyThrows
     public void testClose_whenBinaryFiass_thenSuccess() {
-        Path dir = createTempDir();
+        Path tempDirPath = createTempDir();
         KNNEngine knnEngine = KNNEngine.FAISS;
-        String indexName = "test1" + knnEngine.getExtension();
-        String path = dir.resolve(indexName).toAbsolutePath().toString();
-        int numVectors = 10;
-        int dimension = 8;
-        int dataLength = dimension / 8;
-        int[] ids = new int[numVectors];
-        byte[][] vectors = new byte[numVectors][dataLength];
-        for (int i = 0; i < numVectors; i++) {
-            ids[i] = i;
-            vectors[i][0] = 1;
+        String indexFileName = "test1" + knnEngine.getExtension();
+        try (Directory directory = newFSDirectory(tempDirPath)) {
+            int numVectors = 10;
+            int dimension = 8;
+            int dataLength = dimension / 8;
+            int[] ids = new int[numVectors];
+            byte[][] vectors = new byte[numVectors][dataLength];
+            for (int i = 0; i < numVectors; i++) {
+                ids[i] = i;
+                vectors[i][0] = 1;
+            }
+            Map<String, Object> parameters = ImmutableMap.of(
+                KNNConstants.SPACE_TYPE,
+                SpaceType.HAMMING.getValue(),
+                KNNConstants.INDEX_DESCRIPTION_PARAMETER,
+                "BHNSW32",
+                KNNConstants.VECTOR_DATA_TYPE_FIELD,
+                VectorDataType.BINARY.getValue()
+            );
+            long vectorMemoryAddress = JNICommons.storeBinaryVectorData(0, vectors, numVectors * dataLength);
+            TestUtils.createIndex(ids, vectorMemoryAddress, dimension, directory, indexFileName, parameters, knnEngine);
+
+            // Load index into memory
+            final long memoryAddress;
+            try (IndexInput indexInput = directory.openInput(indexFileName, IOContext.DEFAULT)) {
+                final IndexInputWithBuffer indexInputWithBuffer = new IndexInputWithBuffer(indexInput);
+                memoryAddress = JNIService.loadIndex(indexInputWithBuffer, parameters, knnEngine);
+            }
+
+            ExecutorService executorService = Executors.newSingleThreadExecutor();
+            NativeMemoryAllocation.IndexAllocation indexAllocation = new NativeMemoryAllocation.IndexAllocation(
+                executorService,
+                memoryAddress,
+                (int) directory.fileLength(indexFileName) / 1024,
+                knnEngine,
+                indexFileName,
+                "test",
+                null,
+                true
+            );
+
+            indexAllocation.close();
+
+            Thread.sleep(1000 * 2);
+            indexAllocation.writeLock();
+            assertTrue(indexAllocation.isClosed());
+            indexAllocation.writeUnlock();
+
+            indexAllocation.close();
+
+            Thread.sleep(1000 * 2);
+            indexAllocation.writeLock();
+            assertTrue(indexAllocation.isClosed());
+            indexAllocation.writeUnlock();
+
+            executorService.shutdown();
         }
-        Map<String, Object> parameters = ImmutableMap.of(
-            KNNConstants.SPACE_TYPE,
-            SpaceType.HAMMING.getValue(),
-            KNNConstants.INDEX_DESCRIPTION_PARAMETER,
-            "BHNSW32",
-            KNNConstants.VECTOR_DATA_TYPE_FIELD,
-            VectorDataType.BINARY.getValue()
-        );
-        long vectorMemoryAddress = JNICommons.storeBinaryVectorData(0, vectors, numVectors * dataLength);
-        TestUtils.createIndex(ids, vectorMemoryAddress, dimension, path, parameters, knnEngine);
-
-        // Load index into memory
-        long memoryAddress = JNIService.loadIndex(path, parameters, knnEngine);
-
-        @SuppressWarnings("unchecked")
-        WatcherHandle<FileWatcher> watcherHandle = (WatcherHandle<FileWatcher>) mock(WatcherHandle.class);
-        doNothing().when(watcherHandle).stop();
-
-        ExecutorService executorService = Executors.newSingleThreadExecutor();
-        NativeMemoryAllocation.IndexAllocation indexAllocation = new NativeMemoryAllocation.IndexAllocation(
-            executorService,
-            memoryAddress,
-            IndexUtil.getFileSizeInKB(path),
-            knnEngine,
-            path,
-            "test",
-            watcherHandle,
-            null,
-            true
-        );
-
-        indexAllocation.close();
-
-        Thread.sleep(1000 * 2);
-        indexAllocation.writeLock();
-        assertTrue(indexAllocation.isClosed());
-        indexAllocation.writeUnlock();
-
-        indexAllocation.close();
-
-        Thread.sleep(1000 * 2);
-        indexAllocation.writeLock();
-        assertTrue(indexAllocation.isClosed());
-        indexAllocation.writeUnlock();
-
-        executorService.shutdown();
     }
 
     public void testIndexAllocation_getMemoryAddress() {
@@ -188,8 +190,7 @@ public class NativeMemoryAllocationTests extends KNNTestCase {
             0,
             null,
             "test",
-            "test",
-            null
+            "test"
         );
 
         assertEquals(memoryAddress, indexAllocation.getMemoryAddress());
@@ -204,8 +205,7 @@ public class NativeMemoryAllocationTests extends KNNTestCase {
             0,
             null,
             "test",
-            "test",
-            null
+            "test"
         );
 
         int initialValue = 10;
@@ -231,7 +231,6 @@ public class NativeMemoryAllocationTests extends KNNTestCase {
     }
 
     public void testIndexAllocation_closeDefault() {
-        WatcherHandle<FileWatcher> watcherHandle = (WatcherHandle<FileWatcher>) mock(WatcherHandle.class);
         ExecutorService executorService = Executors.newFixedThreadPool(2);
         AtomicReference<Exception> expectedException = new AtomicReference<>();
 
@@ -242,8 +241,7 @@ public class NativeMemoryAllocationTests extends KNNTestCase {
             0,
             null,
             "test",
-            "test",
-            watcherHandle
+            "test"
         );
 
         executorService.submit(nonBlockingIndexAllocation::readLock);
@@ -259,11 +257,11 @@ public class NativeMemoryAllocationTests extends KNNTestCase {
     }
 
     public void testIndexAllocation_closeBlocking() throws InterruptedException, ExecutionException {
-        WatcherHandle<FileWatcher> watcherHandle = (WatcherHandle<FileWatcher>) mock(WatcherHandle.class);
-        ExecutorService executorService = Executors.newFixedThreadPool(2);
-        AtomicReference<Exception> expectedException = new AtomicReference<>();
+        // Prepare mocking and a thread pool.
+        ExecutorService executorService = Executors.newSingleThreadExecutor();
 
-        // Blocking close
+        // Enable `KNN_FORCE_EVICT_CACHE_ENABLED_SETTING` to force it to block other threads.
+        // Having it false will make `IndexAllocation` to run close logic in a different thread.
         when(clusterSettings.get(KNN_FORCE_EVICT_CACHE_ENABLED_SETTING)).thenReturn(true);
         NativeMemoryAllocation.IndexAllocation blockingIndexAllocation = new NativeMemoryAllocation.IndexAllocation(
             mock(ExecutorService.class),
@@ -271,23 +269,24 @@ public class NativeMemoryAllocationTests extends KNNTestCase {
             0,
             null,
             "test",
-            "test",
-            watcherHandle
+            "test"
         );
 
-        executorService.submit(blockingIndexAllocation::readLock);
+        // Acquire a read lock
+        blockingIndexAllocation.readLock();
+
+        // This should be blocked as a read lock is still being held.
         Future<?> closingThread = executorService.submit(blockingIndexAllocation::close);
 
         // Check if thread is currently blocked
         try {
             closingThread.get(5, TimeUnit.SECONDS);
-        } catch (Exception e) {
-            expectedException.set(e);
-        }
+            fail("Closing should be blocked. We are still holding a read lock.");
+        } catch (TimeoutException ignored) {}
 
-        assertNotNull(expectedException.get());
-
-        executorService.submit(blockingIndexAllocation::readUnlock);
+        // Now, we unlock a read lock.
+        blockingIndexAllocation.readUnlock();
+        // As we don't hold any locking, the closing thread can now good to acquire a write lock.
         closingThread.get();
 
         // Waits until close
@@ -305,8 +304,7 @@ public class NativeMemoryAllocationTests extends KNNTestCase {
             0,
             null,
             "test",
-            "test",
-            null
+            "test"
         );
 
         int initialValue = 10;
@@ -338,8 +336,7 @@ public class NativeMemoryAllocationTests extends KNNTestCase {
             size,
             null,
             "test",
-            "test",
-            null
+            "test"
         );
 
         assertEquals(size, indexAllocation.getSizeInKB());
@@ -353,8 +350,7 @@ public class NativeMemoryAllocationTests extends KNNTestCase {
             0,
             knnEngine,
             "test",
-            "test",
-            null
+            "test"
         );
 
         assertEquals(knnEngine, indexAllocation.getKnnEngine());
@@ -368,11 +364,10 @@ public class NativeMemoryAllocationTests extends KNNTestCase {
             0,
             null,
             indexPath,
-            "test",
-            null
+            "test"
         );
 
-        assertEquals(indexPath, indexAllocation.getIndexPath());
+        assertEquals(indexPath, indexAllocation.getVectorFileName());
     }
 
     public void testIndexAllocation_getOsIndexName() {
@@ -383,8 +378,7 @@ public class NativeMemoryAllocationTests extends KNNTestCase {
             0,
             null,
             "test",
-            osIndexName,
-            null
+            osIndexName
         );
 
         assertEquals(osIndexName, indexAllocation.getOpenSearchIndexName());

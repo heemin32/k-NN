@@ -6,11 +6,14 @@
 package org.opensearch.knn.bwc;
 
 import org.junit.Assert;
+import org.opensearch.common.settings.Settings;
 import org.opensearch.common.xcontent.XContentFactory;
+import org.opensearch.knn.index.KNNSettings;
 import org.opensearch.knn.index.SpaceType;
 import org.opensearch.knn.index.VectorDataType;
 import org.opensearch.knn.index.engine.KNNEngine;
 
+import java.util.List;
 import java.util.Map;
 
 import static org.opensearch.knn.TestUtils.KNN_ALGO_PARAM_EF_CONSTRUCTION_MIN_VALUE;
@@ -23,6 +26,7 @@ import static org.opensearch.knn.common.KNNConstants.DIMENSION;
 import static org.opensearch.knn.common.KNNConstants.FAISS_NAME;
 import static org.opensearch.knn.common.KNNConstants.KNN_ENGINE;
 import static org.opensearch.knn.common.KNNConstants.KNN_METHOD;
+import static org.opensearch.knn.common.KNNConstants.LUCENE_NAME;
 import static org.opensearch.knn.common.KNNConstants.METHOD_HNSW;
 import static org.opensearch.knn.common.KNNConstants.METHOD_PARAMETER_EF_CONSTRUCTION;
 import static org.opensearch.knn.common.KNNConstants.METHOD_PARAMETER_EF_SEARCH;
@@ -51,7 +55,26 @@ public class IndexingIT extends AbstractRestartUpgradeTestCase {
             createKnnIndex(testIndex, getKNNDefaultIndexSettings(), createKnnIndexMapping(TEST_FIELD, DIMENSIONS));
             addKNNDocs(testIndex, TEST_FIELD, DIMENSIONS, DOC_ID, NUM_DOCS);
         } else {
-            validateKNNIndexingOnUpgrade();
+            // update index setting to allow build graph always since we test graph count that are loaded into memory
+            updateIndexSettings(testIndex, Settings.builder().put(KNNSettings.INDEX_KNN_ADVANCED_APPROXIMATE_THRESHOLD, 0));
+            validateKNNIndexingOnUpgrade(NUM_DOCS);
+        }
+    }
+
+    // ensure that index is created using legacy mapping in old cluster, and, then, add docs to both old and new cluster.
+    // when search is requested on new cluster it should return all docs irrespective of cluster.
+    public void testKNNIndexDefaultEngine() throws Exception {
+        waitForClusterHealthGreen(NODES_BWC_CLUSTER);
+        if (isRunningAgainstOldCluster()) {
+            createKnnIndex(testIndex, getKNNDefaultIndexSettings(), createKnnIndexMapping(TEST_FIELD, DIMENSIONS));
+            addKNNDocs(testIndex, TEST_FIELD, DIMENSIONS, DOC_ID, 5);
+            // Flush to ensure that index is not re-indexed when node comes back up
+            flush(testIndex, true);
+        } else {
+            validateKNNSearch(testIndex, TEST_FIELD, DIMENSIONS, 5, 5);
+            addKNNDocs(testIndex, TEST_FIELD, DIMENSIONS, 5, 5);
+            validateKNNSearch(testIndex, TEST_FIELD, DIMENSIONS, 10, 10);
+            deleteKNNIndex(testIndex);
         }
     }
 
@@ -65,8 +88,41 @@ public class IndexingIT extends AbstractRestartUpgradeTestCase {
             addKNNDocs(testIndex, TEST_FIELD, DIMENSIONS, DOC_ID, 100);
             // Flush to ensure that index is not re-indexed when node comes back up
             flush(testIndex, true);
+            validateKNNSearch(testIndex, TEST_FIELD, DIMENSIONS, 100, K);
         } else {
-            forceMergeKnnIndex(testIndex);
+            validateKNNIndexingOnUpgrade(100);
+        }
+    }
+
+    public void testKNNIndexFaissForceMerge() throws Exception {
+        waitForClusterHealthGreen(NODES_BWC_CLUSTER);
+
+        if (isRunningAgainstOldCluster()) {
+            createKnnIndex(testIndex, getKNNDefaultIndexSettings(), createKnnIndexMapping(TEST_FIELD, DIMENSIONS, METHOD_HNSW, FAISS_NAME));
+            addKNNDocs(testIndex, TEST_FIELD, DIMENSIONS, DOC_ID, 100);
+            // Flush to ensure that index is not re-indexed when node comes back up
+            flush(testIndex, true);
+            validateKNNSearch(testIndex, TEST_FIELD, DIMENSIONS, 100, K);
+        } else {
+            validateKNNIndexingOnUpgrade(100);
+        }
+    }
+
+    public void testKNNIndexLuceneForceMerge() throws Exception {
+        waitForClusterHealthGreen(NODES_BWC_CLUSTER);
+
+        if (isRunningAgainstOldCluster()) {
+            createKnnIndex(
+                testIndex,
+                getKNNDefaultIndexSettings(),
+                createKnnIndexMapping(TEST_FIELD, DIMENSIONS, METHOD_HNSW, LUCENE_NAME)
+            );
+            addKNNDocs(testIndex, TEST_FIELD, DIMENSIONS, DOC_ID, 100);
+            // Flush to ensure that index is not re-indexed when node comes back up
+            flush(testIndex, true);
+            validateKNNSearch(testIndex, TEST_FIELD, DIMENSIONS, 100, K);
+        } else {
+            validateKNNIndexingOnUpgrade(100);
         }
     }
 
@@ -104,18 +160,18 @@ public class IndexingIT extends AbstractRestartUpgradeTestCase {
         // When the cluster is in old version, create a KNN index with custom legacy field mapping settings
         // and add documents into that index
         if (isRunningAgainstOldCluster()) {
-            createKnnIndex(
-                testIndex,
-                createKNNIndexCustomLegacyFieldMappingSettings(
-                    SpaceType.LINF,
-                    KNN_ALGO_PARAM_M_MIN_VALUE,
-                    KNN_ALGO_PARAM_EF_CONSTRUCTION_MIN_VALUE
-                ),
-                createKnnIndexMapping(TEST_FIELD, DIMENSIONS)
+            Settings.Builder indexMappingSettings = createKNNIndexCustomLegacyFieldMappingIndexSettingsBuilder(
+                SpaceType.LINF,
+                KNN_ALGO_PARAM_M_MIN_VALUE,
+                KNN_ALGO_PARAM_EF_CONSTRUCTION_MIN_VALUE
             );
+            if (isApproximateThresholdSupported(getBWCVersion())) {
+                indexMappingSettings.put(KNNSettings.INDEX_KNN_ADVANCED_APPROXIMATE_THRESHOLD, 0);
+            }
+            createKnnIndex(testIndex, indexMappingSettings.build(), createKnnIndexMapping(TEST_FIELD, DIMENSIONS));
             addKNNDocs(testIndex, TEST_FIELD, DIMENSIONS, DOC_ID, NUM_DOCS);
         } else {
-            validateKNNIndexingOnUpgrade();
+            validateKNNIndexingOnUpgrade(NUM_DOCS);
         }
     }
 
@@ -126,7 +182,7 @@ public class IndexingIT extends AbstractRestartUpgradeTestCase {
             createKnnIndex(testIndex, getKNNDefaultIndexSettings(), createKNNIndexMethodFieldMapping(TEST_FIELD, DIMENSIONS));
             addKNNDocs(testIndex, TEST_FIELD, DIMENSIONS, DOC_ID, NUM_DOCS);
         } else {
-            validateKNNIndexingOnUpgrade();
+            validateKNNIndexingOnUpgrade(NUM_DOCS);
         }
     }
 
@@ -150,7 +206,7 @@ public class IndexingIT extends AbstractRestartUpgradeTestCase {
             addKNNDocs(testIndex, TEST_FIELD, DIMENSIONS, DOC_ID, NUM_DOCS);
         } else {
             validateCustomMethodFieldMappingAfterUpgrade();
-            validateKNNIndexingOnUpgrade();
+            validateKNNIndexingOnUpgrade(NUM_DOCS);
         }
     }
 
@@ -240,14 +296,15 @@ public class IndexingIT extends AbstractRestartUpgradeTestCase {
     }
 
     // KNN indexing tests when the cluster is upgraded to latest version
-    public void validateKNNIndexingOnUpgrade() throws Exception {
-        QUERY_COUNT = NUM_DOCS;
+    public void validateKNNIndexingOnUpgrade(int numOfDocs) throws Exception {
+        updateIndexSettings(testIndex, Settings.builder().put(KNNSettings.INDEX_KNN_ADVANCED_APPROXIMATE_THRESHOLD, 0));
+        forceMergeKnnIndex(testIndex);
+        QUERY_COUNT = numOfDocs;
         validateKNNSearch(testIndex, TEST_FIELD, DIMENSIONS, QUERY_COUNT, K);
-        cleanUpCache();
-        DOC_ID = NUM_DOCS;
+        clearCache(List.of(testIndex));
+        DOC_ID = numOfDocs;
         addKNNDocs(testIndex, TEST_FIELD, DIMENSIONS, DOC_ID, NUM_DOCS);
         QUERY_COUNT = QUERY_COUNT + NUM_DOCS;
-        validateKNNSearch(testIndex, TEST_FIELD, DIMENSIONS, QUERY_COUNT, K);
         forceMergeKnnIndex(testIndex);
         validateKNNSearch(testIndex, TEST_FIELD, DIMENSIONS, QUERY_COUNT, K);
         deleteKNNIndex(testIndex);

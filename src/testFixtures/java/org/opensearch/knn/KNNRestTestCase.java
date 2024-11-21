@@ -13,6 +13,7 @@ import lombok.extern.log4j.Log4j2;
 import org.apache.commons.lang.StringUtils;
 import org.apache.hc.core5.http.io.entity.EntityUtils;
 import org.apache.hc.core5.net.URIBuilder;
+import org.opensearch.Version;
 import org.opensearch.core.common.bytes.BytesReference;
 import org.opensearch.common.xcontent.XContentHelper;
 import org.opensearch.core.xcontent.DeprecationHandler;
@@ -64,6 +65,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.PriorityQueue;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
@@ -100,6 +102,8 @@ import static org.opensearch.knn.TestUtils.QUERY_VALUE;
 import static org.opensearch.knn.TestUtils.computeGroundTruthValues;
 
 import static org.opensearch.knn.common.KNNConstants.VECTOR_DATA_TYPE_FIELD;
+import static org.opensearch.knn.index.KNNSettings.INDEX_KNN_ADVANCED_APPROXIMATE_THRESHOLD;
+import static org.opensearch.knn.index.KNNSettings.KNN_INDEX;
 import static org.opensearch.knn.index.SpaceType.L2;
 import static org.opensearch.knn.index.memory.NativeMemoryCacheManager.GRAPH_COUNT;
 import static org.opensearch.knn.index.engine.KNNEngine.FAISS;
@@ -112,6 +116,7 @@ import static org.opensearch.knn.plugin.stats.StatNames.INDICES_IN_CACHE;
 public class KNNRestTestCase extends ODFERestTestCase {
     public static final String INDEX_NAME = "test_index";
     public static final String FIELD_NAME = "test_field";
+    public static final String FIELD_NAME_NON_KNN = "test_field_non_knn";
     public static final String PROPERTIES_FIELD = "properties";
     public static final String STORE_FIELD = "store";
     public static final String STORED_QUERY_FIELD = "stored_fields";
@@ -357,6 +362,12 @@ public class KNNRestTestCase extends ODFERestTestCase {
         assertEquals(request.getEndpoint() + ": failed", RestStatus.OK, RestStatus.fromCode(response.getStatusLine().getStatusCode()));
     }
 
+    protected void closeKNNIndex(String index) throws IOException {
+        Request request = new Request("POST", "/" + index + "/_close");
+        Response response = client().performRequest(request);
+        assertEquals(request.getEndpoint() + ": failed", RestStatus.OK, RestStatus.fromCode(response.getStatusLine().getStatusCode()));
+    }
+
     /**
      * For a given index, make a mapping request
      */
@@ -597,6 +608,18 @@ public class KNNRestTestCase extends ODFERestTestCase {
         assertEquals(request.getEndpoint() + ": failed", RestStatus.OK, RestStatus.fromCode(response.getStatusLine().getStatusCode()));
     }
 
+    protected <T> void addNonKNNDoc(String index, String docId, String fieldName, String text) throws IOException {
+        Request request = new Request("POST", "/" + index + "/_doc/" + docId + "?refresh=true");
+
+        XContentBuilder builder = XContentFactory.jsonBuilder().startObject().field(fieldName, text).endObject();
+        request.setJsonEntity(builder.toString());
+        client().performRequest(request);
+
+        request = new Request("POST", "/" + index + "/_refresh");
+        Response response = client().performRequest(request);
+        assertEquals(request.getEndpoint() + ": failed", RestStatus.OK, RestStatus.fromCode(response.getStatusLine().getStatusCode()));
+    }
+
     /**
      * Add a single KNN Doc to an index with a nested vector field
      *
@@ -632,7 +655,12 @@ public class KNNRestTestCase extends ODFERestTestCase {
      * Add a single KNN Doc to an index with multiple fields
      */
     protected void addKnnDoc(String index, String docId, List<String> fieldNames, List<Object[]> vectors) throws IOException {
-        Request request = new Request("POST", "/" + index + "/_doc/" + docId + "?refresh=true");
+        addKnnDoc(index, docId, fieldNames, vectors, true);
+    }
+
+    protected void addKnnDoc(String index, String docId, List<String> fieldNames, List<Object[]> vectors, boolean refresh)
+        throws IOException {
+        Request request = new Request("POST", "/" + index + "/_doc/" + docId + "?refresh=" + refresh);
 
         XContentBuilder builder = XContentFactory.jsonBuilder().startObject();
         for (int i = 0; i < fieldNames.size(); i++) {
@@ -759,6 +787,15 @@ public class KNNRestTestCase extends ODFERestTestCase {
             .put("number_of_replicas", 1)
             .put("index.knn", true)
             .put("index.replication.type", "SEGMENT")
+            .build();
+    }
+
+    protected Settings buildKNNIndexSettings(int approximateThreshold) {
+        return Settings.builder()
+            .put("number_of_shards", 1)
+            .put("number_of_replicas", 0)
+            .put(KNN_INDEX, true)
+            .put(INDEX_KNN_ADVANCED_APPROXIMATE_THRESHOLD, approximateThreshold)
             .build();
     }
 
@@ -1287,6 +1324,7 @@ public class KNNRestTestCase extends ODFERestTestCase {
             Arrays.fill(indexVector, (float) i);
             addKnnDoc(testIndex, Integer.toString(i), testField, indexVector);
         }
+        flushIndex(testIndex);
     }
 
     public void addKNNByteDocs(String testIndex, String testField, int dimension, int firstDocID, int numDocs) throws IOException {
@@ -1295,6 +1333,7 @@ public class KNNRestTestCase extends ODFERestTestCase {
             Arrays.fill(indexVector, (byte) i);
             addKnnDoc(testIndex, Integer.toString(i), testField, indexVector);
         }
+        flushIndex(testIndex);
     }
 
     public void validateKNNSearch(String testIndex, String testField, int dimension, int numDocs, int k) throws Exception {
@@ -1321,15 +1360,22 @@ public class KNNRestTestCase extends ODFERestTestCase {
         }
     }
 
-    protected Settings createKNNIndexCustomLegacyFieldMappingSettings(SpaceType spaceType, Integer m, Integer ef_construction) {
+    protected Settings.Builder createKNNIndexCustomLegacyFieldMappingIndexSettingsBuilder(
+        SpaceType spaceType,
+        Integer m,
+        Integer ef_construction
+    ) {
         return Settings.builder()
             .put(NUMBER_OF_SHARDS, 1)
             .put(NUMBER_OF_REPLICAS, 0)
             .put(INDEX_KNN, true)
             .put(KNNSettings.KNN_SPACE_TYPE, spaceType.getValue())
             .put(KNNSettings.KNN_ALGO_PARAM_M, m)
-            .put(KNNSettings.KNN_ALGO_PARAM_EF_CONSTRUCTION, ef_construction)
-            .build();
+            .put(KNNSettings.KNN_ALGO_PARAM_EF_CONSTRUCTION, ef_construction);
+    }
+
+    protected Settings createKNNIndexCustomLegacyFieldMappingIndexSettings(SpaceType spaceType, Integer m, Integer ef_construction) {
+        return createKNNIndexCustomLegacyFieldMappingIndexSettingsBuilder(spaceType, m, ef_construction).build();
     }
 
     public String createKNNIndexMethodFieldMapping(String fieldName, Integer dimensions) throws IOException {
@@ -1770,6 +1816,13 @@ public class KNNRestTestCase extends ODFERestTestCase {
         assertEquals(request.getEndpoint() + ": failed", RestStatus.OK, RestStatus.fromCode(response.getStatusLine().getStatusCode()));
     }
 
+    protected void flushIndex(final String index) throws IOException {
+        Request request = new Request("POST", "/" + index + "/_flush");
+
+        Response response = client().performRequest(request);
+        assertEquals(request.getEndpoint() + ": failed", RestStatus.OK, RestStatus.fromCode(response.getStatusLine().getStatusCode()));
+    }
+
     protected void addKnnDocWithAttributes(String docId, float[] vector, Map<String, String> fieldValues) throws IOException {
         Request request = new Request("POST", "/" + INDEX_NAME + "/_doc/" + docId + "?refresh=true");
 
@@ -1827,5 +1880,18 @@ public class KNNRestTestCase extends ODFERestTestCase {
 
         builder.endObject().endObject().endObject().endObject();
         return builder;
+    }
+
+    // approximate threshold parameter is only supported on or after V_2_18_0
+    protected boolean isApproximateThresholdSupported(final Optional<String> bwcVersion) {
+        if (bwcVersion.isEmpty()) {
+            return false;
+        }
+        String versionString = bwcVersion.get();
+        if (versionString.endsWith("-SNAPSHOT")) {
+            versionString = versionString.substring(0, versionString.length() - 9);
+        }
+        final Version version = Version.fromString(versionString);
+        return version.onOrAfter(Version.V_2_18_0);
     }
 }

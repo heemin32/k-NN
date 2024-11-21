@@ -41,6 +41,7 @@ import org.opensearch.core.common.unit.ByteSizeValue;
 import org.opensearch.knn.KNNTestCase;
 import org.opensearch.knn.index.KNNSettings;
 import org.opensearch.knn.index.codec.KNN990Codec.QuantizationConfigKNNCollector;
+import org.opensearch.knn.index.codec.util.KNNCodecUtil;
 import org.opensearch.knn.index.engine.MethodComponentContext;
 import org.opensearch.knn.index.SpaceType;
 import org.opensearch.knn.index.VectorDataType;
@@ -78,15 +79,18 @@ import java.util.stream.Collectors;
 import static java.util.Collections.emptyMap;
 import static org.apache.lucene.search.DocIdSetIterator.NO_MORE_DOCS;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyFloat;
 import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
+import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 import static org.opensearch.knn.KNNRestTestCase.INDEX_NAME;
 import static org.opensearch.knn.common.KNNConstants.INDEX_DESCRIPTION_PARAMETER;
@@ -104,6 +108,7 @@ public class KNNWeightTests extends KNNTestCase {
     private static final int K = 5;
     private static final Set<String> SEGMENT_FILES_NMSLIB = Set.of("_0.cfe", "_0_2011_target_field.hnswc");
     private static final Set<String> SEGMENT_FILES_FAISS = Set.of("_0.cfe", "_0_2011_target_field.faissc");
+    private static final Set<String> SEGMENT_FILES_DEFAULT = SEGMENT_FILES_FAISS;
     private static final Set<String> SEGMENT_MULTI_FIELD_FILES_FAISS = Set.of(
         "_0.cfe",
         "_0_2011_target_field.faissc",
@@ -170,7 +175,11 @@ public class KNNWeightTests extends KNNTestCase {
     @SneakyThrows
     public void testQueryResultScoreNmslib() {
         for (SpaceType space : List.of(SpaceType.L2, SpaceType.L1, SpaceType.COSINESIMIL, SpaceType.INNER_PRODUCT, SpaceType.LINF)) {
-            testQueryScore(space::scoreTranslation, SEGMENT_FILES_NMSLIB, Map.of(SPACE_TYPE, space.getValue()));
+            testQueryScore(
+                space::scoreTranslation,
+                SEGMENT_FILES_NMSLIB,
+                Map.of(SPACE_TYPE, space.getValue(), KNN_ENGINE, KNNEngine.NMSLIB.getName())
+            );
         }
     }
 
@@ -325,8 +334,9 @@ public class KNNWeightTests extends KNNTestCase {
     }
 
     @SneakyThrows
-    public void testShardWithoutFiles() {
+    public void testScorer_whenNoVectorFieldsInDocument_thenEmptyScorerIsReturned() {
         final KNNQuery query = new KNNQuery(FIELD_NAME, QUERY_VECTOR, K, INDEX_NAME, (BitSetProducer) null);
+        KNNWeight.initialize(null);
         final KNNWeight knnWeight = new KNNWeight(query, 0.0f);
 
         final LeafReaderContext leafReaderContext = mock(LeafReaderContext.class);
@@ -357,10 +367,9 @@ public class KNNWeightTests extends KNNTestCase {
         final Path path = mock(Path.class);
         when(directory.getDirectory()).thenReturn(path);
         final FieldInfos fieldInfos = mock(FieldInfos.class);
-        final FieldInfo fieldInfo = mock(FieldInfo.class);
         when(reader.getFieldInfos()).thenReturn(fieldInfos);
-        when(fieldInfos.fieldInfo(any())).thenReturn(fieldInfo);
-
+        // When no knn fields are available , field info for vector field will be null
+        when(fieldInfos.fieldInfo(FIELD_NAME)).thenReturn(null);
         final Scorer knnScorer = knnWeight.scorer(leafReaderContext);
         assertEquals(KNNScorer.emptyScorer(knnWeight), knnScorer);
     }
@@ -394,7 +403,7 @@ public class KNNWeightTests extends KNNTestCase {
             Map.of(),
             Sort.RELEVANCE
         );
-        segmentInfo.setFiles(SEGMENT_FILES_NMSLIB);
+        segmentInfo.setFiles(SEGMENT_FILES_DEFAULT);
         final SegmentCommitInfo segmentCommitInfo = new SegmentCommitInfo(segmentInfo, 0, 0, 0, 0, 0, new byte[StringHelper.ID_LENGTH]);
         when(reader.getSegmentInfo()).thenReturn(segmentCommitInfo);
 
@@ -512,6 +521,111 @@ public class KNNWeightTests extends KNNTestCase {
     @SneakyThrows
     public void testANNWithFilterQuery_whenDoingANNBinary_thenSuccess() {
         validateANNWithFilterQuery_whenDoingANN_thenSuccess(true);
+    }
+
+    @SneakyThrows
+    public void testScorerWithQuantizedVector() {
+        // Given
+        int k = 3;
+        byte[] quantizedVector = new byte[] { 1, 2, 3 }; // Mocked quantized vector
+        float[] queryVector = new float[] { 0.1f, 0.3f };
+
+        // Mock the JNI service to return KNNQueryResults
+        KNNQueryResult[] knnQueryResults = new KNNQueryResult[] {
+            new KNNQueryResult(1, 10.0f), // Mock result with id 1 and score 10
+            new KNNQueryResult(2, 20.0f)  // Mock result with id 2 and score 20
+        };
+        jniServiceMockedStatic.when(
+            () -> JNIService.queryBinaryIndex(anyLong(), eq(quantizedVector), eq(k), any(), any(), any(), anyInt(), any())
+        ).thenReturn(knnQueryResults);
+
+        KNNEngine knnEngine = mock(KNNEngine.class);
+        when(knnEngine.score(anyFloat(), eq(SpaceType.HAMMING))).thenAnswer(invocation -> {
+            Float score = invocation.getArgument(0);
+            return 1 / (1 + score);
+        });
+
+        // Build the KNNQuery object
+        final KNNQuery query = KNNQuery.builder()
+            .field(FIELD_NAME)
+            .queryVector(queryVector)
+            .k(k)
+            .indexName(INDEX_NAME)
+            .vectorDataType(VectorDataType.BINARY) // Simulate binary vector type for quantization
+            .build();
+
+        final float boost = 1.0F;
+        final KNNWeight knnWeight = new KNNWeight(query, boost);
+
+        final LeafReaderContext leafReaderContext = mock(LeafReaderContext.class);
+        final SegmentReader reader = mock(SegmentReader.class);
+        when(leafReaderContext.reader()).thenReturn(reader);
+
+        final FieldInfos fieldInfos = mock(FieldInfos.class);
+        final FieldInfo fieldInfo = mock(FieldInfo.class);
+        when(reader.getFieldInfos()).thenReturn(fieldInfos);
+        when(fieldInfos.fieldInfo(FIELD_NAME)).thenReturn(fieldInfo);
+
+        when(fieldInfo.attributes()).thenReturn(Map.of(KNN_ENGINE, KNNEngine.FAISS.getName(), SPACE_TYPE, SpaceType.HAMMING.getValue()));
+
+        FSDirectory directory = mock(FSDirectory.class);
+        when(reader.directory()).thenReturn(directory);
+        Path path = mock(Path.class);
+        when(directory.getDirectory()).thenReturn(path);
+        when(path.toString()).thenReturn("/fake/directory");
+
+        SegmentInfo segmentInfo = new SegmentInfo(
+            directory,  // The directory where the segment is stored
+            Version.LATEST,  // Lucene version
+            Version.LATEST,  // Version of the segment info
+            "0",  // Segment name
+            100,  // Max document count for this segment
+            false,  // Is this a compound file segment
+            false,  // Is this a merged segment
+            KNNCodecVersion.current().getDefaultCodecDelegate(),  // Codec delegate for KNN
+            Map.of(),  // Diagnostics map
+            new byte[StringHelper.ID_LENGTH],  // Segment ID
+            Map.of(),  // Attributes
+            Sort.RELEVANCE  // Default sort order
+        );
+
+        final SegmentCommitInfo segmentCommitInfo = new SegmentCommitInfo(segmentInfo, 0, 0, 0, 0, 0, new byte[StringHelper.ID_LENGTH]);
+
+        when(reader.getSegmentInfo()).thenReturn(segmentCommitInfo);
+
+        try (MockedStatic<KNNCodecUtil> knnCodecUtilMockedStatic = mockStatic(KNNCodecUtil.class)) {
+            List<String> engineFiles = List.of("_0_1_target_field.faiss");
+            knnCodecUtilMockedStatic.when(() -> KNNCodecUtil.getEngineFiles(anyString(), anyString(), eq(segmentInfo)))
+                .thenReturn(engineFiles);
+
+            try (MockedStatic<SegmentLevelQuantizationUtil> quantizationUtilMockedStatic = mockStatic(SegmentLevelQuantizationUtil.class)) {
+                quantizationUtilMockedStatic.when(() -> SegmentLevelQuantizationUtil.quantizeVector(any(), any()))
+                    .thenReturn(quantizedVector);
+
+                // When: Call the scorer method
+                final KNNScorer knnScorer = (KNNScorer) knnWeight.scorer(leafReaderContext);
+
+                // Then: Ensure scorer is not null
+                assertNotNull(knnScorer);
+
+                // Verify that JNIService.queryBinaryIndex is called with the quantized vector
+                jniServiceMockedStatic.verify(
+                    () -> JNIService.queryBinaryIndex(anyLong(), eq(quantizedVector), eq(k), any(), any(), any(), anyInt(), any()),
+                    times(1)
+                );
+
+                // Iterate over the results and ensure they are scored with SpaceType.HAMMING
+                final DocIdSetIterator docIdSetIterator = knnScorer.iterator();
+                assertNotNull(docIdSetIterator);
+                while (docIdSetIterator.nextDoc() != DocIdSetIterator.NO_MORE_DOCS) {
+                    int docId = docIdSetIterator.docID();
+                    float expectedScore = knnEngine.score(knnQueryResults[docId - 1].getScore(), SpaceType.HAMMING);
+                    float actualScore = knnScorer.score();
+                    // Check if the score is calculated using HAMMING
+                    assertEquals(expectedScore, actualScore, 0.01f); // Tolerance for floating-point comparison
+                }
+            }
+        }
     }
 
     public void validateANNWithFilterQuery_whenDoingANN_thenSuccess(final boolean isBinary) throws IOException {
@@ -758,6 +872,83 @@ public class KNNWeightTests extends KNNTestCase {
             assertEquals(docIdSetIterator.cost(), actualDocIds.size());
             assertTrue(Comparators.isInOrder(actualDocIds, Comparator.naturalOrder()));
         }
+    }
+
+    @SneakyThrows
+    public void testRadialSearch_whenNoEngineFiles_thenPerformExactSearch() {
+        ExactSearcher mockedExactSearcher = mock(ExactSearcher.class);
+        final float[] queryVector = new float[] { 0.1f, 2.0f, 3.0f };
+        final SpaceType spaceType = randomFrom(SpaceType.L2, SpaceType.INNER_PRODUCT);
+        KNNWeight.initialize(null, mockedExactSearcher);
+        final KNNQuery query = KNNQuery.builder()
+            .field(FIELD_NAME)
+            .queryVector(queryVector)
+            .indexName(INDEX_NAME)
+            .methodParameters(HNSW_METHOD_PARAMETERS)
+            .build();
+        final KNNWeight knnWeight = new KNNWeight(query, 1.0f);
+
+        final LeafReaderContext leafReaderContext = mock(LeafReaderContext.class);
+        final SegmentReader reader = mock(SegmentReader.class);
+        when(leafReaderContext.reader()).thenReturn(reader);
+
+        final FSDirectory directory = mock(FSDirectory.class);
+        when(reader.directory()).thenReturn(directory);
+        final SegmentInfo segmentInfo = new SegmentInfo(
+            directory,
+            Version.LATEST,
+            Version.LATEST,
+            SEGMENT_NAME,
+            100,
+            false,
+            false,
+            KNNCodecVersion.current().getDefaultCodecDelegate(),
+            Map.of(),
+            new byte[StringHelper.ID_LENGTH],
+            Map.of(),
+            Sort.RELEVANCE
+        );
+        segmentInfo.setFiles(Set.of());
+        final SegmentCommitInfo segmentCommitInfo = new SegmentCommitInfo(segmentInfo, 0, 0, 0, 0, 0, new byte[StringHelper.ID_LENGTH]);
+        when(reader.getSegmentInfo()).thenReturn(segmentCommitInfo);
+
+        final Path path = mock(Path.class);
+        when(directory.getDirectory()).thenReturn(path);
+        final FieldInfos fieldInfos = mock(FieldInfos.class);
+        final FieldInfo fieldInfo = mock(FieldInfo.class);
+        when(reader.getFieldInfos()).thenReturn(fieldInfos);
+        when(fieldInfos.fieldInfo(FIELD_NAME)).thenReturn(fieldInfo);
+        when(fieldInfo.attributes()).thenReturn(
+            Map.of(
+                SPACE_TYPE,
+                spaceType.getValue(),
+                KNN_ENGINE,
+                KNNEngine.FAISS.getName(),
+                PARAMETERS,
+                String.format(Locale.ROOT, "{\"%s\":\"%s\"}", INDEX_DESCRIPTION_PARAMETER, "HNSW32")
+            )
+        );
+        final ExactSearcher.ExactSearcherContext exactSearchContext = ExactSearcher.ExactSearcherContext.builder()
+            .isParentHits(true)
+            // setting to true, so that if quantization details are present we want to do search on the quantized
+            // vectors as this flow is used in first pass of search.
+            .useQuantizedVectorsForSearch(true)
+            .knnQuery(query)
+            .build();
+        when(mockedExactSearcher.searchLeaf(leafReaderContext, exactSearchContext)).thenReturn(DOC_ID_TO_SCORES);
+        final KNNScorer knnScorer = (KNNScorer) knnWeight.scorer(leafReaderContext);
+        assertNotNull(knnScorer);
+        final DocIdSetIterator docIdSetIterator = knnScorer.iterator();
+        final List<Integer> actualDocIds = new ArrayList<>();
+        for (int docId = docIdSetIterator.nextDoc(); docId != NO_MORE_DOCS; docId = docIdSetIterator.nextDoc()) {
+            actualDocIds.add(docId);
+            assertEquals(DOC_ID_TO_SCORES.get(docId), knnScorer.score(), 0.00000001f);
+        }
+        assertEquals(docIdSetIterator.cost(), actualDocIds.size());
+        assertTrue(Comparators.isInOrder(actualDocIds, Comparator.naturalOrder()));
+        // verify JNI Service is not called
+        jniServiceMockedStatic.verifyNoInteractions();
+        verify(mockedExactSearcher).searchLeaf(leafReaderContext, exactSearchContext);
     }
 
     @SneakyThrows
@@ -1317,7 +1508,7 @@ public class KNNWeightTests extends KNNTestCase {
 
         String engineName = fieldInfo.attributes().getOrDefault(KNN_ENGINE, KNNEngine.NMSLIB.getName());
         KNNEngine knnEngine = KNNEngine.getEngine(engineName);
-        List<String> engineFiles = knnWeight.getEngineFiles(reader, knnEngine.getExtension());
+        List<String> engineFiles = KNNCodecUtil.getEngineFiles(knnEngine.getExtension(), query.getField(), reader.getSegmentInfo().info);
         String expectIndexPath = String.format("%s_%s_%s%s%s", SEGMENT_NAME, 2011, FIELD_NAME, knnEngine.getExtension(), "c");
         assertEquals(engineFiles.get(0), expectIndexPath);
 
@@ -1363,9 +1554,9 @@ public class KNNWeightTests extends KNNTestCase {
     public void testANNWithQuantizationParams_whenStateNotFound_thenFail() {
         try (MockedStatic<QuantizationService> quantizationServiceMockedStatic = Mockito.mockStatic(QuantizationService.class)) {
             QuantizationService quantizationService = Mockito.mock(QuantizationService.class);
+            quantizationServiceMockedStatic.when(QuantizationService::getInstance).thenReturn(quantizationService);
             QuantizationParams quantizationParams = new ScalarQuantizationParams(ScalarQuantizationType.ONE_BIT);
             Mockito.when(quantizationService.getQuantizationParams(any(FieldInfo.class))).thenReturn(quantizationParams);
-            quantizationServiceMockedStatic.when(QuantizationService::getInstance).thenReturn(quantizationService);
 
             // Given
             int k = 3;
@@ -1413,6 +1604,8 @@ public class KNNWeightTests extends KNNTestCase {
             when(reader.getFieldInfos()).thenReturn(fieldInfos);
             when(fieldInfos.fieldInfo(any())).thenReturn(fieldInfo);
             when(fieldInfo.attributes()).thenReturn(attributesMap);
+            // fieldName, new float[0], tempCollector, null)
+            doNothing().when(reader).searchNearestVectors(any(), eq(new float[0]), any(), any());
 
             expectThrows(IllegalStateException.class, () -> knnWeight.scorer(leafReaderContext));
         }

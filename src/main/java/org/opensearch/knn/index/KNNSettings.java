@@ -14,6 +14,7 @@ import org.opensearch.action.admin.cluster.settings.ClusterUpdateSettingsRespons
 import org.opensearch.client.Client;
 import org.opensearch.cluster.metadata.IndexMetadata;
 import org.opensearch.cluster.service.ClusterService;
+import org.opensearch.common.Booleans;
 import org.opensearch.common.settings.Setting;
 import org.opensearch.common.settings.Settings;
 import org.opensearch.common.unit.TimeValue;
@@ -66,6 +67,7 @@ public class KNNSettings {
      * Settings name
      */
     public static final String KNN_SPACE_TYPE = "index.knn.space_type";
+    public static final String INDEX_KNN_ADVANCED_APPROXIMATE_THRESHOLD = "index.knn.advanced.approximate_threshold";
     public static final String KNN_ALGO_PARAM_M = "index.knn.algo_param.m";
     public static final String KNN_ALGO_PARAM_EF_CONSTRUCTION = "index.knn.algo_param.ef_construction";
     public static final String KNN_ALGO_PARAM_EF_SEARCH = "index.knn.algo_param.ef_search";
@@ -86,12 +88,19 @@ public class KNNSettings {
     public static final String KNN_FAISS_AVX2_DISABLED = "knn.faiss.avx2.disabled";
     public static final String QUANTIZATION_STATE_CACHE_SIZE_LIMIT = "knn.quantization.cache.size.limit";
     public static final String QUANTIZATION_STATE_CACHE_EXPIRY_TIME_MINUTES = "knn.quantization.cache.expiry.minutes";
+    public static final String KNN_FAISS_AVX512_DISABLED = "knn.faiss.avx512.disabled";
+    public static final String KNN_DISK_VECTOR_SHARD_LEVEL_RESCORING_DISABLED = "index.knn.disk.vector.shard_level_rescoring_disabled";
 
     /**
      * Default setting values
+     *
      */
     public static final boolean KNN_DEFAULT_FAISS_AVX2_DISABLED_VALUE = false;
+    public static final boolean KNN_DEFAULT_FAISS_AVX512_DISABLED_VALUE = false;
     public static final String INDEX_KNN_DEFAULT_SPACE_TYPE = "l2";
+    public static final Integer INDEX_KNN_ADVANCED_APPROXIMATE_THRESHOLD_DEFAULT_VALUE = 15_000;
+    public static final Integer INDEX_KNN_BUILD_VECTOR_DATA_STRUCTURE_THRESHOLD_MIN = -1;
+    public static final Integer INDEX_KNN_BUILD_VECTOR_DATA_STRUCTURE_THRESHOLD_MAX = Integer.MAX_VALUE - 2;
     public static final String INDEX_KNN_DEFAULT_SPACE_TYPE_FOR_BINARY = "hamming";
     public static final Integer INDEX_KNN_DEFAULT_ALGO_PARAM_M = 16;
     public static final Integer INDEX_KNN_DEFAULT_ALGO_PARAM_EF_SEARCH = 100;
@@ -109,10 +118,30 @@ public class KNNSettings {
     public static final Integer KNN_MAX_QUANTIZATION_STATE_CACHE_SIZE_LIMIT_PERCENTAGE = 10; // Quantization state cache limit cannot exceed
                                                                                              // 10% of the JVM heap
     public static final Integer KNN_DEFAULT_QUANTIZATION_STATE_CACHE_EXPIRY_TIME_MINUTES = 60;
+    public static final boolean KNN_DISK_VECTOR_SHARD_LEVEL_RESCORING_DISABLED_VALUE = false;
 
     /**
      * Settings Definition
      */
+
+    /**
+     * This setting controls whether shard-level re-scoring for KNN disk-based vectors is turned off.
+     * The setting uses:
+     * <ul>
+     *     <li><b>KNN_DISK_VECTOR_SHARD_LEVEL_RESCORING_DISABLED:</b> The name of the setting.</li>
+     *     <li><b>KNN_DISK_VECTOR_SHARD_LEVEL_RESCORING_DISABLED_VALUE:</b> The default value (true or false).</li>
+     *     <li><b>IndexScope:</b> The setting works at the index level.</li>
+     *     <li><b>Dynamic:</b> This setting can be changed without restarting the cluster.</li>
+     * </ul>
+     *
+     * @see Setting#boolSetting(String, boolean, Setting.Property...)
+     */
+    public static final Setting<Boolean> KNN_DISK_VECTOR_SHARD_LEVEL_RESCORING_DISABLED_SETTING = Setting.boolSetting(
+        KNN_DISK_VECTOR_SHARD_LEVEL_RESCORING_DISABLED,
+        KNN_DISK_VECTOR_SHARD_LEVEL_RESCORING_DISABLED_VALUE,
+        IndexScope,
+        Dynamic
+    );
 
     // This setting controls how much memory should be used to transfer vectors from Java to JNI Layer. The default
     // 1% of the JVM heap
@@ -129,6 +158,21 @@ public class KNNSettings {
         new SpaceTypeValidator(),
         IndexScope,
         Setting.Property.Deprecated
+    );
+
+    /**
+     * build_vector_data_structure_threshold - This parameter determines when to build vector data structure for knn fields during indexing
+     * and merging. Setting -1 (min) will skip building graph, whereas on any other values, the graph will be built if
+     * number of live docs in segment is greater than this threshold. Since max number of documents in a segment can
+     * be Integer.MAX_VALUE - 1, this setting will allow threshold to be up to 1 less than max number of documents in a segment
+     */
+    public static final Setting<Integer> INDEX_KNN_ADVANCED_APPROXIMATE_THRESHOLD_SETTING = Setting.intSetting(
+        INDEX_KNN_ADVANCED_APPROXIMATE_THRESHOLD,
+        INDEX_KNN_ADVANCED_APPROXIMATE_THRESHOLD_DEFAULT_VALUE,
+        INDEX_KNN_BUILD_VECTOR_DATA_STRUCTURE_THRESHOLD_MIN,
+        INDEX_KNN_BUILD_VECTOR_DATA_STRUCTURE_THRESHOLD_MAX,
+        IndexScope,
+        Dynamic
     );
 
     /**
@@ -302,6 +346,12 @@ public class KNNSettings {
         Dynamic
     );
 
+    public static final Setting<Boolean> KNN_FAISS_AVX512_DISABLED_SETTING = Setting.boolSetting(
+        KNN_FAISS_AVX512_DISABLED,
+        KNN_DEFAULT_FAISS_AVX512_DISABLED_VALUE,
+        NodeScope
+    );
+
     /**
      * Dynamic settings
      */
@@ -429,6 +479,10 @@ public class KNNSettings {
             return KNN_FAISS_AVX2_DISABLED_SETTING;
         }
 
+        if (KNN_FAISS_AVX512_DISABLED.equals(key)) {
+            return KNN_FAISS_AVX512_DISABLED_SETTING;
+        }
+
         if (KNN_VECTOR_STREAMING_MEMORY_LIMIT_IN_MB.equals(key)) {
             return KNN_VECTOR_STREAMING_MEMORY_LIMIT_PCT_SETTING;
         }
@@ -441,12 +495,17 @@ public class KNNSettings {
             return QUANTIZATION_STATE_CACHE_EXPIRY_TIME_MINUTES_SETTING;
         }
 
+        if (KNN_DISK_VECTOR_SHARD_LEVEL_RESCORING_DISABLED.equals(key)) {
+            return KNN_DISK_VECTOR_SHARD_LEVEL_RESCORING_DISABLED_SETTING;
+        }
+
         throw new IllegalArgumentException("Cannot find setting by key [" + key + "]");
     }
 
     public List<Setting<?>> getSettings() {
         List<Setting<?>> settings = Arrays.asList(
             INDEX_KNN_SPACE_TYPE,
+            INDEX_KNN_ADVANCED_APPROXIMATE_THRESHOLD_SETTING,
             INDEX_KNN_ALGO_PARAM_M_SETTING,
             INDEX_KNN_ALGO_PARAM_EF_CONSTRUCTION_SETTING,
             INDEX_KNN_ALGO_PARAM_EF_SEARCH_SETTING,
@@ -460,8 +519,10 @@ public class KNNSettings {
             ADVANCED_FILTERED_EXACT_SEARCH_THRESHOLD_SETTING,
             KNN_FAISS_AVX2_DISABLED_SETTING,
             KNN_VECTOR_STREAMING_MEMORY_LIMIT_PCT_SETTING,
+            KNN_FAISS_AVX512_DISABLED_SETTING,
             QUANTIZATION_STATE_CACHE_SIZE_LIMIT_SETTING,
-            QUANTIZATION_STATE_CACHE_EXPIRY_TIME_MINUTES_SETTING
+            QUANTIZATION_STATE_CACHE_EXPIRY_TIME_MINUTES_SETTING,
+            KNN_DISK_VECTOR_SHARD_LEVEL_RESCORING_DISABLED_SETTING
         );
         return Stream.concat(settings.stream(), Stream.concat(getFeatureFlags().stream(), dynamicCacheSettings.values().stream()))
             .collect(Collectors.toList());
@@ -499,12 +560,29 @@ public class KNNSettings {
         }
     }
 
+    public static boolean isFaissAVX512Disabled() {
+        return Booleans.parseBoolean(
+            Objects.requireNonNullElse(
+                KNNSettings.state().getSettingValue(KNNSettings.KNN_FAISS_AVX512_DISABLED),
+                KNN_DEFAULT_FAISS_AVX512_DISABLED_VALUE
+            ).toString()
+        );
+    }
+
     public static Integer getFilteredExactSearchThreshold(final String indexName) {
         return KNNSettings.state().clusterService.state()
             .getMetadata()
             .index(indexName)
             .getSettings()
             .getAsInt(ADVANCED_FILTERED_EXACT_SEARCH_THRESHOLD, ADVANCED_FILTERED_EXACT_SEARCH_THRESHOLD_DEFAULT_VALUE);
+    }
+
+    public static boolean isShardLevelRescoringEnabledForDiskBasedVector(String indexName) {
+        return KNNSettings.state().clusterService.state()
+            .getMetadata()
+            .index(indexName)
+            .getSettings()
+            .getAsBoolean(KNN_DISK_VECTOR_SHARD_LEVEL_RESCORING_DISABLED, false);
     }
 
     public void initialize(Client client, ClusterService clusterService) {

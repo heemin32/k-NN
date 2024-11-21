@@ -14,11 +14,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 ### Maintenance
 ### Refactoring
 
-## [Unreleased 2.x](https://github.com/opensearch-project/k-NN/compare/2.17...2.x)
+## [Unreleased 2.x](https://github.com/opensearch-project/k-NN/compare/2.18...2.x)
 ### Features
 ### Enhancements
+- Introduced a writing layer in native engines where relies on the writing interface to process IO. (#2241)[https://github.com/opensearch-project/k-NN/pull/2241]
 ### Bug Fixes
+* Fix NPE in ANN search when a segment doesn't contain vector field (#2278)[https://github.com/opensearch-project/k-NN/pull/2278]
 ### Infrastructure
+* Updated C++ version in JNI from c++11 to c++17 [#2259](https://github.com/opensearch-project/k-NN/pull/2259)
+* Upgrade bytebuddy and objenesis version to match OpenSearch core and, update github ci runner for macos [#2279](https://github.com/opensearch-project/k-NN/pull/2279)
 ### Documentation
 ### Maintenance
+* Select index settings based on cluster version[2236](https://github.com/opensearch-project/k-NN/pull/2236)
 ### Refactoring

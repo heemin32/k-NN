@@ -18,7 +18,7 @@ set(TARGET_LIB_NMSLIB opensearchknn_nmslib)  # nmslib JNI
 set(TARGET_LIB_FAISS opensearchknn_faiss)    # faiss JNI
 set(TARGET_LIBS "")  # Libs to be installed
 
-set(CMAKE_CXX_STANDARD 11)
+set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED True)
 option(CONFIG_FAISS "Configure faiss library build when this is on")
 option(CONFIG_NMSLIB "Configure nmslib library build when this is on")
@@ -154,8 +154,10 @@ if ("${WIN32}" STREQUAL "")
                 tests/nmslib_wrapper_unit_test.cpp
                 tests/test_util.cpp
                 tests/commons_test.cpp
+                tests/faiss_stream_support_test.cpp
                 tests/faiss_index_service_test.cpp
-                )
+                tests/nmslib_stream_support_test.cpp
+        )
 
         target_link_libraries(
                 jni_test

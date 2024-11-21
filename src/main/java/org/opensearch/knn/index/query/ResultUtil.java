@@ -33,15 +33,14 @@ public final class ResultUtil {
     public static void reduceToTopK(List<Map<Integer, Float>> perLeafResults, int k) {
         // Iterate over all scores to get min competitive score
         PriorityQueue<Float> topKMinQueue = new PriorityQueue<>(k);
-        for (int i = 0; i < k; i++) {
-            topKMinQueue.add(-Float.MAX_VALUE);
-        }
 
         int count = 0;
         for (Map<Integer, Float> perLeafResult : perLeafResults) {
             count += perLeafResult.size();
             for (Float score : perLeafResult.values()) {
-                if (topKMinQueue.peek() != null && score > topKMinQueue.peek()) {
+                if (topKMinQueue.size() < k) {
+                    topKMinQueue.add(score);
+                } else if (topKMinQueue.peek() != null && score > topKMinQueue.peek()) {
                     topKMinQueue.poll();
                     topKMinQueue.add(score);
                 }
@@ -59,17 +58,17 @@ public final class ResultUtil {
     }
 
     /**
-     * Convert map to bit set
+     * Convert map to bit set, if resultMap is empty or null then returns an Optional. Returning an optional here to
+     * ensure that the caller is aware that BitSet may not be present
      *
      * @param resultMap Map of results
-     * @return BitSet of results
+     * @return BitSet of results; null is returned if the result map is empty
      * @throws IOException If an error occurs during the search.
      */
     public static BitSet resultMapToMatchBitSet(Map<Integer, Float> resultMap) throws IOException {
-        if (resultMap.isEmpty()) {
-            return BitSet.of(DocIdSetIterator.empty(), 0);
+        if (resultMap == null || resultMap.isEmpty()) {
+            return null;
         }
-
         final int maxDoc = Collections.max(resultMap.keySet()) + 1;
         return BitSet.of(resultMapToDocIds(resultMap, maxDoc), maxDoc);
     }

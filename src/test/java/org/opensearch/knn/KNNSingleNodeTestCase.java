@@ -5,6 +5,7 @@
 
 package org.opensearch.knn;
 
+import org.opensearch.action.admin.indices.settings.put.UpdateSettingsRequest;
 import org.opensearch.core.action.ActionListener;
 import org.opensearch.core.common.bytes.BytesReference;
 import org.opensearch.cluster.ClusterName;
@@ -14,6 +15,8 @@ import org.opensearch.cluster.block.ClusterBlockLevel;
 import org.opensearch.cluster.block.ClusterBlocks;
 import org.opensearch.cluster.service.ClusterService;
 import org.opensearch.common.xcontent.XContentHelper;
+import org.opensearch.knn.index.KNNSettings;
+import org.opensearch.knn.index.engine.KNNEngine;
 import org.opensearch.knn.index.query.KNNQueryBuilder;
 import org.opensearch.knn.index.memory.NativeMemoryCacheManager;
 import org.opensearch.knn.index.memory.NativeMemoryLoadStrategy;
@@ -48,6 +51,7 @@ import java.util.concurrent.ExecutionException;
 import static org.mockito.Mockito.when;
 import static org.opensearch.knn.common.KNNConstants.DIMENSION;
 import static org.opensearch.knn.common.KNNConstants.KNN_ENGINE;
+import static org.opensearch.knn.common.KNNConstants.METHOD_HNSW;
 import static org.opensearch.knn.common.KNNConstants.METHOD_PARAMETER_SPACE_TYPE;
 import static org.opensearch.knn.common.KNNConstants.MODEL_BLOB_PARAMETER;
 import static org.opensearch.knn.common.KNNConstants.MODEL_DESCRIPTION;
@@ -105,6 +109,30 @@ public class KNNSingleNodeTestCase extends OpenSearchSingleNodeTestCase {
     }
 
     /**
+     * Create simple k-NN mapping with engine
+     */
+    protected void createKnnIndexMapping(String indexName, String fieldName, Integer dimensions, KNNEngine engine) throws IOException {
+        PutMappingRequest request = new PutMappingRequest(indexName);
+        XContentBuilder xContentBuilder = XContentFactory.jsonBuilder().startObject().startObject("properties");
+        xContentBuilder.startObject(fieldName);
+        xContentBuilder.field("type", "knn_vector").field("dimension", dimensions.toString());
+        xContentBuilder.startObject("method");
+        xContentBuilder.field("name", METHOD_HNSW);
+        xContentBuilder.field(KNN_ENGINE, engine.getName());
+        xContentBuilder.endObject();
+        xContentBuilder.endObject();
+        xContentBuilder.endObject();
+        xContentBuilder.endObject();
+        request.source(xContentBuilder);
+        OpenSearchAssertions.assertAcked(client().admin().indices().putMapping(request).actionGet());
+    }
+
+    protected void updateIndexSetting(String indexName, Settings setting) {
+        UpdateSettingsRequest request = new UpdateSettingsRequest(setting, indexName);
+        OpenSearchAssertions.assertAcked(client().admin().indices().updateSettings(request).actionGet());
+    }
+
+    /**
      * Create simple k-NN mapping which can be nested.
      * e.g. fieldPath = "a.b.c" will create mapping for "c" as knn_vector
      */
@@ -138,6 +166,18 @@ public class KNNSingleNodeTestCase extends OpenSearchSingleNodeTestCase {
      */
     protected Settings getKNNDefaultIndexSettings() {
         return Settings.builder().put("number_of_shards", 1).put("number_of_replicas", 0).put("index.knn", true).build();
+    }
+
+    /**
+     * Get default k-NN settings for test cases with build graph always
+     */
+    protected Settings getKNNDefaultIndexSettingsBuildsGraphAlways() {
+        return Settings.builder()
+            .put("number_of_shards", 1)
+            .put("number_of_replicas", 0)
+            .put("index.knn", true)
+            .put(KNNSettings.INDEX_KNN_ADVANCED_APPROXIMATE_THRESHOLD, 0)
+            .build();
     }
 
     /**

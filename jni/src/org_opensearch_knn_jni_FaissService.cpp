@@ -17,6 +17,7 @@
 
 #include "faiss_wrapper.h"
 #include "jni_util.h"
+#include "faiss_stream_support.h"
 
 static knn_jni::JNIUtil jniUtil;
 static const jint KNN_FAISS_JNI_VERSION = JNI_VERSION_1_1;
@@ -40,8 +41,8 @@ void JNI_OnUnload(JavaVM *vm, void *reserved) {
 }
 
 JNIEXPORT jlong JNICALL Java_org_opensearch_knn_jni_FaissService_initIndex(JNIEnv * env, jclass cls,
-                                                                            jlong numDocs, jint dimJ,
-                                                                            jobject parametersJ)
+                                                                           jlong numDocs, jint dimJ,
+                                                                           jobject parametersJ)
 {
     try {
         std::unique_ptr<knn_jni::faiss_wrapper::FaissMethods> faissMethods(new knn_jni::faiss_wrapper::FaissMethods());
@@ -54,8 +55,8 @@ JNIEXPORT jlong JNICALL Java_org_opensearch_knn_jni_FaissService_initIndex(JNIEn
 }
 
 JNIEXPORT jlong JNICALL Java_org_opensearch_knn_jni_FaissService_initBinaryIndex(JNIEnv * env, jclass cls,
-                                                                            jlong numDocs, jint dimJ,
-                                                                            jobject parametersJ)
+                                                                                 jlong numDocs, jint dimJ,
+                                                                                 jobject parametersJ)
 {
     try {
         std::unique_ptr<knn_jni::faiss_wrapper::FaissMethods> faissMethods(new knn_jni::faiss_wrapper::FaissMethods());
@@ -68,8 +69,8 @@ JNIEXPORT jlong JNICALL Java_org_opensearch_knn_jni_FaissService_initBinaryIndex
 }
 
 JNIEXPORT jlong JNICALL Java_org_opensearch_knn_jni_FaissService_initByteIndex(JNIEnv * env, jclass cls,
-                                                                            jlong numDocs, jint dimJ,
-                                                                            jobject parametersJ)
+                                                                               jlong numDocs, jint dimJ,
+                                                                               jobject parametersJ)
 {
     try {
         std::unique_ptr<knn_jni::faiss_wrapper::FaissMethods> faissMethods(new knn_jni::faiss_wrapper::FaissMethods());
@@ -82,8 +83,8 @@ JNIEXPORT jlong JNICALL Java_org_opensearch_knn_jni_FaissService_initByteIndex(J
 }
 
 JNIEXPORT void JNICALL Java_org_opensearch_knn_jni_FaissService_insertToIndex(JNIEnv * env, jclass cls, jintArray idsJ,
-                                                                            jlong vectorsAddressJ, jint dimJ,
-                                                                            jlong indexAddress, jint threadCount)
+                                                                              jlong vectorsAddressJ, jint dimJ,
+                                                                              jlong indexAddress, jint threadCount)
 {
     try {
         std::unique_ptr<knn_jni::faiss_wrapper::FaissMethods> faissMethods(new knn_jni::faiss_wrapper::FaissMethods());
@@ -96,8 +97,8 @@ JNIEXPORT void JNICALL Java_org_opensearch_knn_jni_FaissService_insertToIndex(JN
 }
 
 JNIEXPORT void JNICALL Java_org_opensearch_knn_jni_FaissService_insertToBinaryIndex(JNIEnv * env, jclass cls, jintArray idsJ,
-                                                                            jlong vectorsAddressJ, jint dimJ,
-                                                                            jlong indexAddress, jint threadCount)
+                                                                                    jlong vectorsAddressJ, jint dimJ,
+                                                                                    jlong indexAddress, jint threadCount)
 {
     try {
         std::unique_ptr<knn_jni::faiss_wrapper::FaissMethods> faissMethods(new knn_jni::faiss_wrapper::FaissMethods());
@@ -110,8 +111,8 @@ JNIEXPORT void JNICALL Java_org_opensearch_knn_jni_FaissService_insertToBinaryIn
 }
 
 JNIEXPORT void JNICALL Java_org_opensearch_knn_jni_FaissService_insertToByteIndex(JNIEnv * env, jclass cls, jintArray idsJ,
-                                                                            jlong vectorsAddressJ, jint dimJ,
-                                                                            jlong indexAddress, jint threadCount)
+                                                                                  jlong vectorsAddressJ, jint dimJ,
+                                                                                  jlong indexAddress, jint threadCount)
 {
     try {
         std::unique_ptr<knn_jni::faiss_wrapper::FaissMethods> faissMethods(new knn_jni::faiss_wrapper::FaissMethods());
@@ -123,85 +124,112 @@ JNIEXPORT void JNICALL Java_org_opensearch_knn_jni_FaissService_insertToByteInde
     }
 }
 
-JNIEXPORT void JNICALL Java_org_opensearch_knn_jni_FaissService_writeIndex(JNIEnv * env, jclass cls,
-                                                                            jlong indexAddress,
-                                                                            jstring indexPathJ)
+JNIEXPORT void JNICALL Java_org_opensearch_knn_jni_FaissService_writeIndex(JNIEnv * env,
+                                                                           jclass cls,
+                                                                           jlong indexAddress,
+                                                                           jobject output)
 {
-    try {
-        std::unique_ptr<knn_jni::faiss_wrapper::FaissMethods> faissMethods(new knn_jni::faiss_wrapper::FaissMethods());
-        knn_jni::faiss_wrapper::IndexService indexService(std::move(faissMethods));
-        knn_jni::faiss_wrapper::WriteIndex(&jniUtil, env, indexPathJ, indexAddress, &indexService);
-    } catch (...) {
-        jniUtil.CatchCppExceptionAndThrowJava(env);
-    }
+  try {
+      std::unique_ptr<knn_jni::faiss_wrapper::FaissMethods> faissMethods(new knn_jni::faiss_wrapper::FaissMethods());
+      knn_jni::faiss_wrapper::IndexService indexService(std::move(faissMethods));
+      knn_jni::faiss_wrapper::WriteIndex(&jniUtil, env, output, indexAddress, &indexService);
+  } catch (...) {
+      jniUtil.CatchCppExceptionAndThrowJava(env);
+  }
 }
 
-JNIEXPORT void JNICALL Java_org_opensearch_knn_jni_FaissService_writeBinaryIndex(JNIEnv * env, jclass cls,
-                                                                            jlong indexAddress,
-                                                                            jstring indexPathJ)
+JNIEXPORT void JNICALL Java_org_opensearch_knn_jni_FaissService_writeBinaryIndex(JNIEnv * env,
+                                                                                 jclass cls,
+                                                                                 jlong indexAddress,
+                                                                                 jobject output)
 {
-    try {
-        std::unique_ptr<knn_jni::faiss_wrapper::FaissMethods> faissMethods(new knn_jni::faiss_wrapper::FaissMethods());
-        knn_jni::faiss_wrapper::BinaryIndexService binaryIndexService(std::move(faissMethods));
-        knn_jni::faiss_wrapper::WriteIndex(&jniUtil, env, indexPathJ, indexAddress, &binaryIndexService);
-    } catch (...) {
-        jniUtil.CatchCppExceptionAndThrowJava(env);
-    }
+  try {
+      std::unique_ptr<knn_jni::faiss_wrapper::FaissMethods> faissMethods(new knn_jni::faiss_wrapper::FaissMethods());
+      knn_jni::faiss_wrapper::BinaryIndexService binaryIndexService(std::move(faissMethods));
+      knn_jni::faiss_wrapper::WriteIndex(&jniUtil, env, output, indexAddress, &binaryIndexService);
+  } catch (...) {
+      jniUtil.CatchCppExceptionAndThrowJava(env);
+  }
 }
 
-JNIEXPORT void JNICALL Java_org_opensearch_knn_jni_FaissService_writeByteIndex(JNIEnv * env, jclass cls,
-                                                                            jlong indexAddress,
-                                                                            jstring indexPathJ)
+JNIEXPORT void JNICALL Java_org_opensearch_knn_jni_FaissService_writeByteIndex(JNIEnv * env,
+                                                                               jclass cls,
+                                                                               jlong indexAddress,
+                                                                               jobject output)
 {
-    try {
-        std::unique_ptr<knn_jni::faiss_wrapper::FaissMethods> faissMethods(new knn_jni::faiss_wrapper::FaissMethods());
-        knn_jni::faiss_wrapper::ByteIndexService byteIndexService(std::move(faissMethods));
-        knn_jni::faiss_wrapper::WriteIndex(&jniUtil, env, indexPathJ, indexAddress, &byteIndexService);
-    } catch (...) {
-        jniUtil.CatchCppExceptionAndThrowJava(env);
-    }
+  try {
+      std::unique_ptr<knn_jni::faiss_wrapper::FaissMethods> faissMethods(new knn_jni::faiss_wrapper::FaissMethods());
+      knn_jni::faiss_wrapper::ByteIndexService byteIndexService(std::move(faissMethods));
+      knn_jni::faiss_wrapper::WriteIndex(&jniUtil, env, output, indexAddress, &byteIndexService);
+  } catch (...) {
+      jniUtil.CatchCppExceptionAndThrowJava(env);
+  }
 }
 
-JNIEXPORT void JNICALL Java_org_opensearch_knn_jni_FaissService_createIndexFromTemplate(JNIEnv * env, jclass cls,
+JNIEXPORT void JNICALL Java_org_opensearch_knn_jni_FaissService_createIndexFromTemplate(JNIEnv * env,
+                                                                                        jclass cls,
                                                                                         jintArray idsJ,
                                                                                         jlong vectorsAddressJ,
                                                                                         jint dimJ,
-                                                                                        jstring indexPathJ,
+                                                                                        jobject output,
                                                                                         jbyteArray templateIndexJ,
                                                                                         jobject parametersJ)
 {
     try {
-        knn_jni::faiss_wrapper::CreateIndexFromTemplate(&jniUtil, env, idsJ, vectorsAddressJ, dimJ, indexPathJ, templateIndexJ, parametersJ);
+        knn_jni::faiss_wrapper::CreateIndexFromTemplate(&jniUtil,
+                                                        env,
+                                                        idsJ,
+                                                        vectorsAddressJ,
+                                                        dimJ,
+                                                        output,
+                                                        templateIndexJ,
+                                                        parametersJ);
     } catch (...) {
         jniUtil.CatchCppExceptionAndThrowJava(env);
     }
 }
 
-JNIEXPORT void JNICALL Java_org_opensearch_knn_jni_FaissService_createBinaryIndexFromTemplate(JNIEnv * env, jclass cls,
-                                                                                        jintArray idsJ,
-                                                                                        jlong vectorsAddressJ,
-                                                                                        jint dimJ,
-                                                                                        jstring indexPathJ,
-                                                                                        jbyteArray templateIndexJ,
-                                                                                        jobject parametersJ)
+JNIEXPORT void JNICALL Java_org_opensearch_knn_jni_FaissService_createBinaryIndexFromTemplate(JNIEnv * env,
+                                                                                              jclass cls,
+                                                                                              jintArray idsJ,
+                                                                                              jlong vectorsAddressJ,
+                                                                                              jint dimJ,
+                                                                                              jobject output,
+                                                                                              jbyteArray templateIndexJ,
+                                                                                              jobject parametersJ)
 {
     try {
-        knn_jni::faiss_wrapper::CreateBinaryIndexFromTemplate(&jniUtil, env, idsJ, vectorsAddressJ, dimJ, indexPathJ, templateIndexJ, parametersJ);
+        knn_jni::faiss_wrapper::CreateBinaryIndexFromTemplate(&jniUtil,
+                                                              env,
+                                                              idsJ,
+                                                              vectorsAddressJ,
+                                                              dimJ,
+                                                              output,
+                                                              templateIndexJ,
+                                                              parametersJ);
     } catch (...) {
         jniUtil.CatchCppExceptionAndThrowJava(env);
     }
 }
 
-JNIEXPORT void JNICALL Java_org_opensearch_knn_jni_FaissService_createByteIndexFromTemplate(JNIEnv * env, jclass cls,
-                                                                                        jintArray idsJ,
-                                                                                        jlong vectorsAddressJ,
-                                                                                        jint dimJ,
-                                                                                        jstring indexPathJ,
-                                                                                        jbyteArray templateIndexJ,
-                                                                                        jobject parametersJ)
+JNIEXPORT void JNICALL Java_org_opensearch_knn_jni_FaissService_createByteIndexFromTemplate(JNIEnv * env,
+                                                                                            jclass cls,
+                                                                                            jintArray idsJ,
+                                                                                            jlong vectorsAddressJ,
+                                                                                            jint dimJ,
+                                                                                            jobject output,
+                                                                                            jbyteArray templateIndexJ,
+                                                                                            jobject parametersJ)
 {
     try {
-        knn_jni::faiss_wrapper::CreateByteIndexFromTemplate(&jniUtil, env, idsJ, vectorsAddressJ, dimJ, indexPathJ, templateIndexJ, parametersJ);
+        knn_jni::faiss_wrapper::CreateByteIndexFromTemplate(&jniUtil,
+                                                            env,
+                                                            idsJ,
+                                                            vectorsAddressJ,
+                                                            dimJ,
+                                                            output,
+                                                            templateIndexJ,
+                                                            parametersJ);
     } catch (...) {
         jniUtil.CatchCppExceptionAndThrowJava(env);
     }
@@ -209,11 +237,33 @@ JNIEXPORT void JNICALL Java_org_opensearch_knn_jni_FaissService_createByteIndexF
 
 JNIEXPORT jlong JNICALL Java_org_opensearch_knn_jni_FaissService_loadIndex(JNIEnv * env, jclass cls, jstring indexPathJ)
 {
+  try {
+      return knn_jni::faiss_wrapper::LoadIndex(&jniUtil, env, indexPathJ);
+  } catch (...) {
+      jniUtil.CatchCppExceptionAndThrowJava(env);
+  }
+  return NULL;
+}
+
+JNIEXPORT jlong JNICALL Java_org_opensearch_knn_jni_FaissService_loadIndexWithStream(JNIEnv * env,
+                                                                                     jclass cls,
+                                                                                     jobject readStream)
+{
     try {
-        return knn_jni::faiss_wrapper::LoadIndex(&jniUtil, env, indexPathJ);
+        // Create a mediator locally.
+        // Note that `indexInput` is `IndexInputWithBuffer` type.
+        knn_jni::stream::NativeEngineIndexInputMediator mediator {&jniUtil, env, readStream};
+
+        // Wrap the mediator with a glue code inheriting IOReader.
+        knn_jni::stream::FaissOpenSearchIOReader faissOpenSearchIOReader {&mediator};
+
+        // Pass IOReader to Faiss for loading vector index.
+        return knn_jni::faiss_wrapper::LoadIndexWithStream(
+                 &faissOpenSearchIOReader);
     } catch (...) {
         jniUtil.CatchCppExceptionAndThrowJava(env);
     }
+
     return NULL;
 }
 
@@ -227,8 +277,31 @@ JNIEXPORT jlong JNICALL Java_org_opensearch_knn_jni_FaissService_loadBinaryIndex
     return NULL;
 }
 
-JNIEXPORT jboolean JNICALL Java_org_opensearch_knn_jni_FaissService_isSharedIndexStateRequired
-        (JNIEnv * env, jclass cls, jlong indexPointerJ)
+JNIEXPORT jlong JNICALL Java_org_opensearch_knn_jni_FaissService_loadBinaryIndexWithStream(JNIEnv * env,
+                                                                                           jclass cls,
+                                                                                           jobject readStream)
+{
+    try {
+        // Create a mediator locally.
+        // Note that `indexInput` is `IndexInputWithBuffer` type.
+        knn_jni::stream::NativeEngineIndexInputMediator mediator {&jniUtil, env, readStream};
+
+        // Wrap the mediator with a glue code inheriting IOReader.
+        knn_jni::stream::FaissOpenSearchIOReader faissOpenSearchIOReader {&mediator};
+
+        // Pass IOReader to Faiss for loading vector index.
+        return knn_jni::faiss_wrapper::LoadBinaryIndexWithStream(
+            &faissOpenSearchIOReader);
+    } catch (...) {
+        jniUtil.CatchCppExceptionAndThrowJava(env);
+    }
+
+    return NULL;
+}
+
+JNIEXPORT jboolean JNICALL Java_org_opensearch_knn_jni_FaissService_isSharedIndexStateRequired(JNIEnv * env,
+                                                                                               jclass cls,
+                                                                                               jlong indexPointerJ)
 {
     try {
         return knn_jni::faiss_wrapper::IsSharedIndexStateRequired(indexPointerJ);
@@ -382,10 +455,10 @@ JNIEXPORT jlong JNICALL Java_org_opensearch_knn_jni_FaissService_transferVectors
 }
 
 JNIEXPORT jobjectArray JNICALL Java_org_opensearch_knn_jni_FaissService_rangeSearchIndex(JNIEnv * env, jclass cls,
-                                                                                   jlong indexPointerJ,
-                                                                                   jfloatArray queryVectorJ,
-                                                                                   jfloat radiusJ, jobject methodParamsJ,
-                                                                                   jint maxResultWindowJ, jintArray parentIdsJ)
+                                                                                         jlong indexPointerJ,
+                                                                                         jfloatArray queryVectorJ,
+                                                                                         jfloat radiusJ, jobject methodParamsJ,
+                                                                                         jint maxResultWindowJ, jintArray parentIdsJ)
 {
     try {
         return knn_jni::faiss_wrapper::RangeSearch(&jniUtil, env, indexPointerJ, queryVectorJ, radiusJ, methodParamsJ, maxResultWindowJ, parentIdsJ);
@@ -396,10 +469,10 @@ JNIEXPORT jobjectArray JNICALL Java_org_opensearch_knn_jni_FaissService_rangeSea
 }
 
 JNIEXPORT jobjectArray JNICALL Java_org_opensearch_knn_jni_FaissService_rangeSearchIndexWithFilter(JNIEnv * env, jclass cls,
-                                                                                   jlong indexPointerJ,
-                                                                                   jfloatArray queryVectorJ,
-                                                                                   jfloat radiusJ, jobject methodParamsJ, jint maxResultWindowJ,
-                                                                                   jlongArray filterIdsJ, jint filterIdsTypeJ, jintArray parentIdsJ)
+                                                                                                   jlong indexPointerJ,
+                                                                                                   jfloatArray queryVectorJ,
+                                                                                                   jfloat radiusJ, jobject methodParamsJ, jint maxResultWindowJ,
+                                                                                                   jlongArray filterIdsJ, jint filterIdsTypeJ, jintArray parentIdsJ)
 {
     try {
         return knn_jni::faiss_wrapper::RangeSearchWithFilter(&jniUtil, env, indexPointerJ, queryVectorJ, radiusJ, methodParamsJ, maxResultWindowJ, filterIdsJ, filterIdsTypeJ, parentIdsJ);

@@ -21,10 +21,10 @@ extern "C" {
 /*
  * Class:     org_opensearch_knn_jni_NmslibService
  * Method:    createIndex
- * Signature: ([IJILjava/lang/String;Ljava/util/Map;)V
+ * Signature: ([IJILorg/opensearch/knn/index/store/IndexOutputWithBuffer;Ljava/util/Map;)V
  */
 JNIEXPORT void JNICALL Java_org_opensearch_knn_jni_NmslibService_createIndex
-        (JNIEnv *, jclass, jintArray, jlong, jint, jstring, jobject);
+    (JNIEnv *, jclass, jintArray, jlong, jint, jobject, jobject);
 
 /*
  * Class:     org_opensearch_knn_jni_NmslibService
@@ -33,6 +33,14 @@ JNIEXPORT void JNICALL Java_org_opensearch_knn_jni_NmslibService_createIndex
  */
 JNIEXPORT jlong JNICALL Java_org_opensearch_knn_jni_NmslibService_loadIndex
   (JNIEnv *, jclass, jstring, jobject);
+
+/*
+ * Class:     org_opensearch_knn_jni_NmslibService
+ * Method:    loadIndexWithStream
+ * Signature: (Lorg/opensearch/knn/index/store/IndexInputWithBuffer;Ljava/util/Map;)J
+ */
+JNIEXPORT jlong JNICALL Java_org_opensearch_knn_jni_NmslibService_loadIndexWithStream
+    (JNIEnv *, jclass, jobject, jobject);
 
 /*
  * Class:     org_opensearch_knn_jni_NmslibService
