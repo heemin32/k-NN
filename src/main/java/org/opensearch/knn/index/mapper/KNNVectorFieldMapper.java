@@ -62,6 +62,12 @@ import static org.opensearch.knn.index.mapper.KNNVectorFieldMapperUtil.validateI
 import static org.opensearch.knn.index.mapper.KNNVectorFieldMapperUtil.validateIfKNNPluginEnabled;
 import static org.opensearch.knn.index.mapper.ModelFieldMapper.UNSET_MODEL_DIMENSION_IDENTIFIER;
 
+import org.opensearch.knn.index.mapper.config.MappingConfigurationResolver;
+import org.opensearch.knn.index.mapper.factory.KNNVectorFieldMapperFactory;
+import org.opensearch.knn.index.mapper.validation.MutualExclusivityValidationRule;
+import org.opensearch.knn.index.mapper.validation.SpaceTypeValidationRule;
+import org.opensearch.knn.index.mapper.validation.ValidationChain;
+
 /**
  * Field Mapper for KNN vector type. Implementations of this class define what needs to be stored in Lucene's fieldType.
  * This allows us to have alternative mappings for the same field type.
@@ -239,84 +245,29 @@ public abstract class KNNVectorFieldMapper extends ParametrizedFieldMapper {
         public KNNVectorFieldMapper build(BuilderContext context) {
             validateFullFieldName(context);
 
-            final MultiFields multiFieldsBuilder = this.multiFieldsBuilder.build(this, context);
-            final CopyTo copyToBuilder = copyTo.build();
-            final Explicit<Boolean> ignoreMalformed = ignoreMalformed(context);
-            final Map<String, String> metaValue = meta.getValue();
-
+            // Use the TypeParser's configuration resolver to determine the configuration type
+            // We'll need to pass this information or reconstruct it here
+            // For now, let's use a simple approach based on the existing logic
+            
             if (modelId.get() != null) {
-                return ModelFieldMapper.createFieldMapper(
-                    buildFullName(context),
-                    name,
-                    metaValue,
-                    vectorDataType.getValue(),
-                    multiFieldsBuilder,
-                    copyToBuilder,
-                    ignoreMalformed,
-                    stored.get(),
-                    hasDocValues.get(),
-                    modelDao,
-                    indexCreatedVersion,
-                    originalParameters,
-                    knnMethodConfigContext
-                );
+                return KNNVectorFieldMapperFactory.createFieldMapper(this, context, 
+                    org.opensearch.knn.index.mapper.config.MappingConfigurationType.MODEL);
             }
-
-            // return FlatVectorFieldMapper only for indices that are created on or after 2.17.0, for others, use either LuceneFieldMapper
-            // or
-            // MethodFieldMapper to maintain backwards compatibility
+            
             if (originalParameters.getResolvedKnnMethodContext() == null && context.indexCreatedVersion().onOrAfter(Version.V_2_17_0)) {
-                return FlatVectorFieldMapper.createFieldMapper(
-                    buildFullName(context),
-                    name,
-                    metaValue,
-                    KNNMethodConfigContext.builder()
-                        .vectorDataType(vectorDataType.getValue())
-                        .versionCreated(indexCreatedVersion)
-                        .dimension(dimension.getValue())
-                        .build(),
-                    multiFieldsBuilder,
-                    copyToBuilder,
-                    ignoreMalformed,
-                    stored.get(),
-                    hasDocValues.get(),
-                    originalParameters
-                );
+                return KNNVectorFieldMapperFactory.createFieldMapper(this, context, 
+                    org.opensearch.knn.index.mapper.config.MappingConfigurationType.FLAT);
             }
-
-            if (originalParameters.getResolvedKnnMethodContext().getKnnEngine() == KNNEngine.LUCENE) {
+            
+            if (originalParameters.getResolvedKnnMethodContext() != null && 
+                originalParameters.getResolvedKnnMethodContext().getKnnEngine() == KNNEngine.LUCENE) {
                 log.debug(String.format(Locale.ROOT, "Use [LuceneFieldMapper] mapper for field [%s]", name));
-                LuceneFieldMapper.CreateLuceneFieldMapperInput createLuceneFieldMapperInput = LuceneFieldMapper.CreateLuceneFieldMapperInput
-                    .builder()
-                    .name(name)
-                    .multiFields(multiFieldsBuilder)
-                    .copyTo(copyToBuilder)
-                    .ignoreMalformed(ignoreMalformed)
-                    .stored(stored.getValue())
-                    .hasDocValues(hasDocValues.getValue())
-                    .originalKnnMethodContext(knnMethodContext.get())
-                    .build();
-                return LuceneFieldMapper.createFieldMapper(
-                    buildFullName(context),
-                    metaValue,
-                    knnMethodConfigContext,
-                    createLuceneFieldMapperInput,
-                    originalParameters
-                );
+                return KNNVectorFieldMapperFactory.createFieldMapper(this, context, 
+                    org.opensearch.knn.index.mapper.config.MappingConfigurationType.METHOD);
             }
 
-            return MethodFieldMapper.createFieldMapper(
-                buildFullName(context),
-                name,
-                metaValue,
-                knnMethodConfigContext,
-                multiFieldsBuilder,
-                copyToBuilder,
-                ignoreMalformed,
-                stored.getValue(),
-                hasDocValues.getValue(),
-                originalParameters
-            );
+            return KNNVectorFieldMapperFactory.createFieldMapper(this, context, 
+                org.opensearch.knn.index.mapper.config.MappingConfigurationType.METHOD);
         }
 
         /**
@@ -351,9 +302,16 @@ public abstract class KNNVectorFieldMapper extends ParametrizedFieldMapper {
         // Use a supplier here because in {@link org.opensearch.knn.KNNPlugin#getMappers()} the ModelDao has not yet
         // been initialized
         private Supplier<ModelDao> modelDaoSupplier;
+        private final MappingConfigurationResolver configurationResolver;
+        private final ValidationChain commonValidationChain;
 
         public TypeParser(Supplier<ModelDao> modelDaoSupplier) {
             this.modelDaoSupplier = modelDaoSupplier;
+            this.configurationResolver = new MappingConfigurationResolver();
+            this.commonValidationChain = new ValidationChain(Arrays.asList(
+                new MutualExclusivityValidationRule(),
+                new SpaceTypeValidationRule()
+            ));
         }
 
         @Override
@@ -368,188 +326,18 @@ public abstract class KNNVectorFieldMapper extends ParametrizedFieldMapper {
             builder.parse(name, parserContext, node);
             builder.setOriginalParameters(new OriginalMappingParameters(builder));
 
-            // All <a
-            // href="https://github.com/opensearch-project/OpenSearch/blob/1.0.0/server/src/main/java/org/opensearch/index/mapper/DocumentMapperParser.java#L115-L161">parsing</a>
-            // is done before any mappers are built. Therefore, validation should be done during parsing
+            // All parsing is done before any mappers are built. Therefore, validation should be done during parsing
             // so that it can fail early.
-            if (builder.knnMethodContext.get() != null && builder.modelId.get() != null) {
-                throw new IllegalArgumentException(
-                    String.format(Locale.ROOT, "Method and model can not be both specified in the mapping: %s", name)
-                );
-            }
-
-            // Check for flat configuration and validate only if index is created after 2.17
-            if (isKNNDisabled(parserContext.getSettings()) && parserContext.indexVersionCreated().onOrAfter(Version.V_2_17_0)) {
-                validateFromFlat(builder);
-            } else if (builder.modelId.get() != null) {
-                validateFromModel(builder);
-            } else {
-                // Validate that the mode and compression are not set if data type is not float, as they are not
-                // supported.
-                validateModeAndCompressionForDataType(builder);
-                // If the original knnMethodContext is not null, resolve its space type and engine from the rest of the
-                // configuration. This is consistent with the existing behavior for space type in 2.16 where we modify the
-                // parsed value
-                SpaceType resolvedSpaceType = SpaceTypeResolver.INSTANCE.resolveSpaceType(
-                    builder.originalParameters.getKnnMethodContext(),
-                    builder.vectorDataType.get(),
-                    builder.topLevelSpaceType.get()
-                );
-                setSpaceType(builder.originalParameters.getKnnMethodContext(), resolvedSpaceType);
-                validateSpaceType(builder);
-                resolveKNNMethodComponents(builder, parserContext, resolvedSpaceType);
-                validateFromKNNMethod(builder);
-            }
+            
+            // Apply common validation rules first
+            commonValidationChain.validate(builder, parserContext);
+            
+            // Resolve and apply configuration-specific logic
+            configurationResolver.resolveAndConfigure(builder, parserContext);
 
             return builder;
         }
 
-        private void validateSpaceType(KNNVectorFieldMapper.Builder builder) {
-            final KNNMethodContext knnMethodContext = builder.knnMethodContext.get();
-            // if context is defined
-            if (knnMethodContext != null) {
-                // now ensure both space types are same.
-                final SpaceType knnMethodContextSpaceType = knnMethodContext.getSpaceType();
-                final SpaceType topLevelSpaceType = SpaceType.getSpace(builder.topLevelSpaceType.get());
-                if (topLevelSpaceType != SpaceType.UNDEFINED
-                    && topLevelSpaceType != knnMethodContextSpaceType
-                    && knnMethodContextSpaceType != SpaceType.UNDEFINED) {
-                    throw new MapperParsingException(
-                        "Space type in \"method\" and top level space type should be same or one of them should be defined"
-                    );
-                }
-            }
-        }
-
-        private void validateModeAndCompressionForDataType(KNNVectorFieldMapper.Builder builder) {
-            boolean isModeOrCompressionConfigured = builder.mode.isConfigured() || builder.compressionLevel.isConfigured();
-            if (isModeOrCompressionConfigured && builder.vectorDataType.getValue() != VectorDataType.FLOAT) {
-                throw new MapperParsingException(
-                    String.format(Locale.ROOT, "Compression and mode cannot be used for non-float32 data type for field %s", builder.name)
-                );
-            }
-        }
-
-        private void validateFromFlat(KNNVectorFieldMapper.Builder builder) {
-            if (builder.modelId.get() != null || builder.knnMethodContext.get() != null) {
-                throw new IllegalArgumentException("Cannot set modelId or method parameters when index.knn setting is false");
-            }
-            validateDimensionSet(builder);
-            validateCompressionAndModeNotSet(builder, builder.name(), "flat");
-        }
-
-        private void validateFromModel(KNNVectorFieldMapper.Builder builder) {
-            // Dimension should not be null unless modelId is used
-            if (builder.dimension.getValue() == UNSET_MODEL_DIMENSION_IDENTIFIER && builder.modelId.get() == null) {
-                throw new IllegalArgumentException(String.format(Locale.ROOT, "Dimension value missing for vector: %s", builder.name()));
-            }
-            // ensure model and top level spaceType is not defined
-            if (builder.modelId.get() != null && SpaceType.getSpace(builder.topLevelSpaceType.get()) != SpaceType.UNDEFINED) {
-                throw new IllegalArgumentException("TopLevel Space type and model can not be both specified in the " + "mapping");
-            }
-
-            validateCompressionAndModeNotSet(builder, builder.name(), "model");
-        }
-
-        private void validateFromKNNMethod(KNNVectorFieldMapper.Builder builder) {
-            ValidationException validationException;
-            if (builder.originalParameters.getResolvedKnnMethodContext().isTrainingRequired()) {
-                validationException = new ValidationException();
-                validationException.addValidationError(String.format(Locale.ROOT, "\"%s\" requires training.", KNN_METHOD));
-                throw validationException;
-            }
-
-            if (builder.originalParameters.getResolvedKnnMethodContext() != null) {
-                validationException = builder.originalParameters.getResolvedKnnMethodContext().validate(builder.knnMethodConfigContext);
-                if (validationException != null) {
-                    throw validationException;
-                }
-            }
-            validateDimensionSet(builder);
-        }
-
-        private void validateDimensionSet(KNNVectorFieldMapper.Builder builder) {
-            if (builder.dimension.getValue() == UNSET_MODEL_DIMENSION_IDENTIFIER) {
-                throw new IllegalArgumentException(String.format(Locale.ROOT, "Dimension value missing for vector: %s", builder.name()));
-            }
-        }
-
-        private void validateCompressionAndModeNotSet(KNNVectorFieldMapper.Builder builder, String name, String context) {
-            if (builder.mode.isConfigured() || builder.compressionLevel.isConfigured()) {
-                throw new MapperParsingException(
-                    String.format(
-                        Locale.ROOT,
-                        "Compression and mode can not be specified in a %s mapping configuration for field: %s",
-                        context,
-                        name
-                    )
-                );
-            }
-        }
-
-        private void resolveKNNMethodComponents(
-            KNNVectorFieldMapper.Builder builder,
-            ParserContext parserContext,
-            SpaceType resolvedSpaceType
-        ) {
-            // Setup the initial configuration that is used to help resolve parameters.
-            builder.setKnnMethodConfigContext(
-                KNNMethodConfigContext.builder()
-                    .vectorDataType(builder.originalParameters.getVectorDataType())
-                    .versionCreated(parserContext.indexVersionCreated())
-                    .dimension(builder.originalParameters.getDimension())
-                    .mode(Mode.fromName(builder.originalParameters.getMode()))
-                    .compressionLevel(CompressionLevel.fromName(builder.originalParameters.getCompressionLevel()))
-                    .build()
-            );
-
-            if (useKNNMethodContextFromLegacy(builder, parserContext)) {
-                // Then create KNNMethodContext to be used from the legacy index settings
-                builder.originalParameters.setResolvedKnnMethodContext(
-                    createKNNMethodContextFromLegacy(parserContext.getSettings(), parserContext.indexVersionCreated(), resolvedSpaceType)
-                );
-            }
-
-            // Based on config context, if the user does not set the engine, set it
-            KNNEngine resolvedKNNEngine = EngineResolver.INSTANCE.resolveEngine(
-                builder.knnMethodConfigContext,
-                builder.originalParameters.getResolvedKnnMethodContext(),
-                false
-            );
-            setEngine(builder.originalParameters.getResolvedKnnMethodContext(), resolvedKNNEngine);
-
-            // Create a copy of the KNNMethodContext and fill in the parameters left blank by configuration context context
-            ResolvedMethodContext resolvedMethodContext = resolvedKNNEngine.resolveMethod(
-                builder.originalParameters.getResolvedKnnMethodContext(),
-                builder.knnMethodConfigContext,
-                false,
-                resolvedSpaceType
-            );
-
-            // The original parameters stores both the resolveMethodContext as well as the original provided by the
-            // user. Now that we have resolved, we need to update this in the original parameters.
-            builder.originalParameters.setResolvedKnnMethodContext(resolvedMethodContext.getKnnMethodContext());
-            builder.knnMethodConfigContext.setCompressionLevel(resolvedMethodContext.getCompressionLevel());
-        }
-
-        private boolean isKNNDisabled(Settings settings) {
-            boolean isSettingPresent = KNNSettings.IS_KNN_INDEX_SETTING.exists(settings);
-            return !isSettingPresent || !KNNSettings.IS_KNN_INDEX_SETTING.get(settings);
-        }
-
-        private void setSpaceType(final KNNMethodContext knnMethodContext, final SpaceType spaceType) {
-            if (knnMethodContext == null) {
-                return;
-            }
-            knnMethodContext.setSpaceType(spaceType);
-        }
-
-        private void setEngine(final KNNMethodContext knnMethodContext, KNNEngine knnEngine) {
-            if (knnMethodContext == null || knnMethodContext.isEngineConfigured()) {
-                return;
-            }
-            knnMethodContext.setKnnEngine(knnEngine);
-        }
     }
 
     static boolean useKNNMethodContextFromLegacy(Builder builder, Mapper.TypeParser.ParserContext parserContext) {
